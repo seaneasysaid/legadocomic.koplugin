@@ -137,6 +137,7 @@ function M.fetchAndShow(a, b)
         v.cur_ch = start_ch
         v.imglist = list
         v.cur_img = options.start_img or 1
+        v._session_start = os.time() -- 本次打开漫画的时间(隔章清理用)
         if v.cur_img > #list then v.cur_img = #list end
         local bb = M.loadImage(v, start_ch, v.cur_img, list) or placeholder_bb()
         -- 多图模式构造, 启用 ImageViewer 内建翻页手势 -> onShowNextImage/onShowPrevImage
@@ -148,6 +149,7 @@ function M.fetchAndShow(a, b)
             total_ch = options.total_ch,
             chapter_title = v.chapter_title,
             on_close_callback = options.on_close_callback,
+            _session_start = os.time(),
             image = bb,
             fullscreen = true,
             with_title_bar = false,
@@ -285,6 +287,8 @@ end
 
 -- 自动清理: 进入第 N 章时, 删除第 N-2 章及更早章节的缓存图片
 -- (当前章 + 下一章预取的图保留, 上一章保留方便回翻)
+-- 双保险: 同时把"修改时间早于本次打开漫画"且不在保留集合里的文件一并删掉,
+-- 这样跨会话的孤儿文件也能清掉, 不依赖会话内的章节记忆
 function M:_autoClearOldChapters(new_ch)
     if settings.get("auto_clear_chapter") == false then return end
     local keep = {}
@@ -292,6 +296,7 @@ function M:_autoClearOldChapters(new_ch)
     if self.next_list then
         for _, u in ipairs(self.next_list) do keep[u] = true end
     end
+    -- 1) 按会话内记录的章节 url 列表删
     local lists = self._loaded_lists or {}
     local removed = 0
     for ch, urls in pairs(lists) do
@@ -300,8 +305,12 @@ function M:_autoClearOldChapters(new_ch)
             lists[ch] = nil
         end
     end
+    -- 2) 按时间删孤儿(早于本次打开漫画、且 key 不在当前/下一章保留集合)
+    local keep_keys = {}
+    for u in pairs(keep) do keep_keys[Cache.key(u)] = true end
+    removed = removed + Cache.pruneBefore(self._session_start or os.time(), keep_keys)
     if removed > 0 then
-        logger.dbg("legadocomic auto-cleared", removed, "cached images (ch <= ", new_ch - 2, ")")
+        logger.info("legadocomic auto-cleared", removed, "cached images (entering ch", new_ch, ")")
     end
 end
 

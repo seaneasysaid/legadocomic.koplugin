@@ -129,6 +129,27 @@ function M.removeUrls(urls, keep)
     return removed
 end
 
+-- 删除 keep_keys(md5 集合)之外、修改时间早于 ts 的缓存文件
+-- 用于"隔章自动清理": 不依赖会话内记忆, 孤儿文件(上个会话遗留)也能清掉
+function M.pruneBefore(ts, keep_keys)
+    ensure_dir()
+    local removed = 0
+    for entry in lfs.dir(cache_dir) do
+        if entry:match("%.img$") then
+            local key = entry:sub(1, -5) -- 去掉 .img 后缀
+            if not (keep_keys and keep_keys[key]) then
+                local p = cache_dir .. "/" .. entry
+                local attr = lfs.attributes(p)
+                if attr and attr.mode == "file" and (attr.modification or 0) < ts then
+                    os.remove(p)
+                    removed = removed + 1
+                end
+            end
+        end
+    end
+    return removed
+end
+
 function M.clear()
     ensure_dir()
     for entry in lfs.dir(cache_dir) do
