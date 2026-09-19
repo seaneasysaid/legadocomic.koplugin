@@ -127,7 +127,7 @@ function M:_getOrCreateBook(book, md5, now)
         db:exec("COMMIT;")
         return id
     end)
-    pcall(stmt.close, stmt)
+    if stmt then pcall(stmt.close, stmt) end
     if not ok then pcall(db.exec, db, "ROLLBACK;") end
     pcall(db.close, db)
     return ok and result or nil, ok and nil or tostring(result)
@@ -168,7 +168,7 @@ function M:_flushSpan(end_now)
         pcall(stmt.close, stmt); stmt = nil
         db:exec("COMMIT;")
     end)
-    pcall(stmt.close, stmt)
+    if stmt then pcall(stmt.close, stmt) end
     if not ok then pcall(db.exec, db, "ROLLBACK;") end
     pcall(db.close, db)
     if ok then
@@ -181,6 +181,7 @@ end
 
 -- book = {name, author, bookUrl}; 失败静默降级, 绝不影响阅读
 function M:start(book)
+    logger.info("legadocomic stats: start called for", tostring(book and book.name))
     if self._closed then self._closed = nil end
     local now = os.time()
     local id, err = self:_getOrCreateBook(book, M.identityForBook(book), now)
@@ -193,6 +194,7 @@ function M:start(book)
     self.current_page = 1
     self._anchor = now
     self._pending = 0
+    logger.info("legadocomic stats: start ok, book_id=", id)
     return true
 end
 

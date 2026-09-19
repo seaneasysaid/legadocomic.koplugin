@@ -84,10 +84,11 @@ function M:show()
     }
     UIManager:show(self)
     -- KOReader 原生统计桥接: 开始记录
-    pcall(function()
+    local ok_s, err_s = pcall(function()
         StatBridge:start(self.book)
         StatBridge:onPageChanged(self.cur_img or 1)
     end)
+    if not ok_s then logger.warn("legadocomic statbridge start error:", tostring(err_s)) end
     -- 首屏渲染完成后启动预取
     self:schedulePrefetch()
 end
