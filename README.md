@@ -98,7 +98,7 @@ KOReader → 打开插件菜单（文件管理器顶部「搜索」图标里找 
 ## 致谢与许可
 
 - 上游项目：[pengcw/legado.koplugin](https://github.com/pengcw/legado.koplugin)（流式漫画阅读的实现参考）
-- 「开源阅读」：[gedoor/legado](https://github.com/gedoor/legado)
+- 「开源阅读」：[LegadoTeam/legado](https://github.com/LegadoTeam/legado)
 - 本插件仅供学习交流，请支持正版漫画。
 
 ## 免责声明
