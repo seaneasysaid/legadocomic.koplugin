@@ -108,6 +108,27 @@ function M.prune(limit_bytes)
     end
 end
 
+-- 删除单个 url 的缓存 (用于"自动删除已看完章节")
+function M.remove(url)
+    local p = M.path(M.key(url))
+    if util.pathExists(p) then
+        os.remove(p)
+        return true
+    end
+    return false
+end
+
+-- 批量删除一组 url 的缓存; keep 为可选 url 集合(set), 命中的跳过
+function M.removeUrls(urls, keep)
+    local removed = 0
+    for _, url in ipairs(urls or {}) do
+        if not (keep and keep[url]) and M.remove(url) then
+            removed = removed + 1
+        end
+    end
+    return removed
+end
+
 function M.clear()
     ensure_dir()
     for entry in lfs.dir(cache_dir) do

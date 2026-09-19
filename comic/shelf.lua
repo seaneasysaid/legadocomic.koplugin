@@ -352,6 +352,14 @@ function Shelf:openSettings()
             end,
         },
         {
+            text = "自动删除旧章节缓存(隔两章): " .. ((settings.get("auto_clear_chapter") ~= false) and "开" or "关"),
+            callback = function()
+                settings.set("auto_clear_chapter", settings.get("auto_clear_chapter") == false)
+                UI.info("已保存", 1)
+                reopen()
+            end,
+        },
+        {
             text = "图片代理缩放: " .. ((settings.get("proxy_image") ~= false) and "开" or "关"),
             callback = function()
                 settings.set("proxy_image", settings.get("proxy_image") == false)

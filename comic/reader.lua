@@ -283,6 +283,28 @@ function M:gotoPage(ch_index, img_index, direction)
     end)
 end
 
+-- 自动清理: 进入第 N 章时, 删除第 N-2 章及更早章节的缓存图片
+-- (当前章 + 下一章预取的图保留, 上一章保留方便回翻)
+function M:_autoClearOldChapters(new_ch)
+    if settings.get("auto_clear_chapter") == false then return end
+    local keep = {}
+    for _, u in ipairs(self.imglist or {}) do keep[u] = true end
+    if self.next_list then
+        for _, u in ipairs(self.next_list) do keep[u] = true end
+    end
+    local lists = self._loaded_lists or {}
+    local removed = 0
+    for ch, urls in pairs(lists) do
+        if ch <= new_ch - 2 then
+            removed = removed + Cache.removeUrls(urls, keep)
+            lists[ch] = nil
+        end
+    end
+    if removed > 0 then
+        logger.dbg("legadocomic auto-cleared", removed, "cached images (ch <= ", new_ch - 2, ")")
+    end
+end
+
 function M:_applyPage(ch_index, img_index, list, title, direction)
     if self.image and self.image.free then
         pcall(function() self.image:free() end)
@@ -307,10 +329,17 @@ function M:_applyPage(ch_index, img_index, list, title, direction)
     self.cur_img = img_index
     if title then self.chapter_title = title end
     if ch_index ~= (self._last_ch or ch_index) then
+        -- 记住刚离开这一章的 url 列表(供隔章清理)
+        self._loaded_lists = self._loaded_lists or {}
+        if self.imglist and #self.imglist > 0 then
+            self._loaded_lists[self._last_ch] = self.imglist
+        end
         -- 跨章后旧预取失效(下一章列表若匹配则已在 gotoPage 中消费)
         self.next_list = nil
         self.next_list_ch = nil
         self.next_title = nil
+        -- 隔两章清理: 删除第 N-2 章及更早的缓存
+        self:_autoClearOldChapters(ch_index)
     end
     self._last_ch = ch_index
 
