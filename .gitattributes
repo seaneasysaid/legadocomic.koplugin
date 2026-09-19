@@ -1,0 +1,2 @@
+*.lua text eol=lf
+README.md text eol=utf-8
