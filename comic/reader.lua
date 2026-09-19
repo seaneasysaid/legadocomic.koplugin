@@ -10,6 +10,7 @@ local logger = require("logger")
 local Api = require("comic/api")
 local Cache = require("comic/cache")
 local Progress = require("comic/progress")
+local StatBridge = require("comic/statbridge")
 
 -- 按键诊断日志: 记录阅读器收到的原始按键名
 local DataStorage = require("datastorage")
@@ -82,6 +83,11 @@ function M:show()
         ShowPrevImage = { { "RPgBack", "LPgBack", "PageUp" }, event = "ShowPrevImage" },
     }
     UIManager:show(self)
+    -- KOReader 原生统计桥接: 开始记录
+    pcall(function()
+        StatBridge:start(self.book)
+        StatBridge:onPageChanged(self.cur_img or 1)
+    end)
     -- 首屏渲染完成后启动预取
     self:schedulePrefetch()
 end
@@ -165,13 +171,14 @@ function M:onClose()
         UIManager:unschedule(self._prefetch_timer)
         self._prefetch_timer = nil
     end
-    -- 保存进度并同步
+    -- 保存进度并同步; 统计收尾
     if self.book and self.imglist and #self.imglist > 0 then
         pcall(function()
             Progress.save(self.book, self.cur_ch, self.cur_img, self.chapter_title)
             Api.saveBookProgress(self.book, self.cur_ch - 1, self.chapter_title)
         end)
     end
+    pcall(function() StatBridge:close() end)
     if self.image and self.image.free then
         pcall(function() self.image:free() end)
         self.image = nil
@@ -316,6 +323,11 @@ function M:_applyPage(ch_index, img_index, list, title, direction)
     self:update()
     pcall(function()
         Progress.save(self.book, self.cur_ch, self.cur_img, self.chapter_title)
+    end)
+    -- 统计桥接: 页变化 + 定期落盘
+    pcall(function()
+        StatBridge:onPageChanged(self.cur_img)
+        StatBridge:checkpoint()
     end)
     self:schedulePrefetch()
 end
