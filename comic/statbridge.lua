@@ -153,8 +153,9 @@ function M:_flushSpan(end_now)
     }
     local db, err = self:_open()
     if not db then logger.warn("legadocomic stats unavailable:", err); return nil end
+    logger.info("legadocomic stats: flushing", duration, "s (page", row.page, "book", self.book_id, ")")
     local stmt
-    local ok = pcall(function()
+    local ok, result = pcall(function()
         db:exec("BEGIN IMMEDIATE;")
         stmt = db:prepare([[INSERT OR IGNORE INTO page_stat_data
             (id_book, page, start_time, duration, total_pages) VALUES (?, ?, ?, ?, ?);]])
@@ -173,7 +174,7 @@ function M:_flushSpan(end_now)
     if ok then
         self._anchor = end_now
     else
-        logger.warn("legadocomic stats write failed")
+        logger.warn("legadocomic stats write failed:", tostring(result))
     end
     return ok
 end
@@ -212,7 +213,11 @@ end
 
 -- 阅读器关闭: 把剩余时长(>=5s)补上
 function M:close()
-    if not self.book_id then return end
+    if not self.book_id then
+        logger.info("legadocomic stats: close without book_id, skip")
+        return
+    end
+    logger.info("legadocomic stats: close, flushing tail")
     pcall(self._flushSpan, self, os.time())
     self.book_id = nil
     self._pending = 0
