@@ -164,6 +164,7 @@ function M:_flushSpan(end_now)
         local count, seconds = db:rowexec(string.format(
             "SELECT count(DISTINCT page), sum(duration) FROM page_stat WHERE id_book = %d;", self.book_id))
         stmt = db:prepare("UPDATE book SET pages=?, last_open=?, total_read_time=?, total_read_pages=? WHERE id=?;")
+        -- pages 保持虚拟总页数: 与 page_stat_data.total_pages 一致, 保证 page_stat 视图映射恒等
         stmt:reset():bind(VIRTUAL_PAGE_COUNT, end_now, tonumber(seconds) or 0, tonumber(count) or 0, self.book_id):step()
         pcall(stmt.close, stmt); stmt = nil
         db:exec("COMMIT;")

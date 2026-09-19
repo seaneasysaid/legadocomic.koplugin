@@ -86,7 +86,7 @@ function M:show()
     -- KOReader 原生统计桥接: 开始记录
     local ok_s, err_s = pcall(function()
         StatBridge:start(self.book)
-        StatBridge:onPageChanged(self.cur_img or 1)
+        StatBridge:onPageChanged((self.cur_ch or 1) * 100000 + (self.cur_img or 1))
     end)
     if not ok_s then logger.warn("legadocomic statbridge start error:", tostring(err_s)) end
     -- 首屏渲染完成后启动预取
@@ -324,15 +324,18 @@ function M:_applyPage(ch_index, img_index, list, title, direction)
         return
     end
 
+    -- 先取旧章信息(此时 imglist 还是上一章的)
+    local old_ch, old_list = self._last_ch, self.imglist
+
     self.cur_ch = ch_index
     self.imglist = list
     self.cur_img = img_index
     if title then self.chapter_title = title end
-    if ch_index ~= (self._last_ch or ch_index) then
+    if ch_index ~= (old_ch or ch_index) then
         -- 记住刚离开这一章的 url 列表(供隔章清理)
         self._loaded_lists = self._loaded_lists or {}
-        if self.imglist and #self.imglist > 0 then
-            self._loaded_lists[self._last_ch] = self.imglist
+        if old_list and #old_list > 0 then
+            self._loaded_lists[old_ch] = old_list
         end
         -- 跨章后旧预取失效(下一章列表若匹配则已在 gotoPage 中消费)
         self.next_list = nil
@@ -354,9 +357,9 @@ function M:_applyPage(ch_index, img_index, list, title, direction)
     pcall(function()
         Progress.save(self.book, self.cur_ch, self.cur_img, self.chapter_title)
     end)
-    -- 统计桥接: 页变化 + 定期落盘
+    -- 统计桥接: 页变化 + 定期落盘 (页号用全局唯一值: 章号*100000+章内页号, 每张图都计为不同页)
     pcall(function()
-        StatBridge:onPageChanged(self.cur_img)
+        StatBridge:onPageChanged(ch_index * 100000 + img_index)
         StatBridge:checkpoint()
     end)
     self:schedulePrefetch()
