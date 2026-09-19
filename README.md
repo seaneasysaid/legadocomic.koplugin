@@ -99,7 +99,7 @@ KOReader → 打开插件菜单（文件管理器顶部「搜索」图标里找 
 
 看漫画的时间会计入 KOReader 原生「阅读统计」：
 
-- 实现参考 [jnjnnjzch/leko-reader](https://github.com/jnjnnjzch/leko-reader) 的 `KOReaderStatisticsBridge.lua`，直接写 `statistics.sqlite3`（校验 schema 版本 20221111，操作 `book` / `page_stat_data` 表），不走 ReaderUI 文档管道
+- 直接读写 `statistics.sqlite3` 公开 schema（校验 schema 版本 20221111，操作 `book` / `page_stat_data` 表），不走 ReaderUI 文档管道
 - 每本书按 `bookUrl` 的 md5 作为唯一键，在统计里显示书名/作者，时长每 60 秒落一条、单条上限 120 秒
 - 需要 KOReader 的「阅读统计」插件已启用（统计库存在）；库不存在或 schema 不符时静默降级，不影响阅读
 - 统计的是「从打开到退出阅读器的时长」（按翻页事件分段），在中间菜单里停留的时间也会计入

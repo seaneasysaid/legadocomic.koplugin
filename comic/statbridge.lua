@@ -1,5 +1,4 @@
 -- KOReaderStatisticsBridge: 把漫画阅读时长/页数写入 KOReader 原生 statistics.sqlite3
--- 参考 jnjnnjzch/leko-reader 的 Leko/KOReaderStatisticsBridge.lua (AGPL-3.0)
 -- 只操作公开 schema: 校验 user_version == 20221111, 写 book / page_stat_data
 -- 漫画适配: 翻页快, 单页常不足 5s, 不按页计时; 改为会话累计, 每 60s 落一条
 local DataStorage = require("datastorage")
