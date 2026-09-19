@@ -89,7 +89,7 @@ function Shelf:openChapterDialog(book)
     end)
 end
 
--- 收藏管理: 纯点击切换收藏, 不依赖长按手势
+-- 收藏管理: 纯点击切换收藏
 function Shelf:openFavManager(books)
     -- 分级导航: 保留书架在下层
     if self._fav_menu then
@@ -155,7 +155,7 @@ function Shelf:openReader(book, ch, img, total_ch)
     })
 end
 
--- 书籍长按: 加入/取消 收藏快捷方式
+-- 切换收藏状态(供收藏管理调用)
 function Shelf:toggleFavorite(book, on_done)
     local is_fav = Favs.toggle(book)
     UI.info(is_fav and ("⭐ 已加入收藏: " .. book.name) or ("已取消收藏: " .. book.name), 2)
@@ -185,7 +185,7 @@ function Shelf:show()
         -- 收藏快捷方式区
         local favs = Favs.list()
         if #favs > 0 then
-            table.insert(items, { text = "── ⭐ 收藏 ── (长按书籍可加/取消)", enabled = false })
+            table.insert(items, { text = "── ⭐ 收藏 ──", enabled = false })
             for _, f in ipairs(favs) do
                 local label = "⭐ " .. f.name
                 if tostring(f.author or "") ~= "" then label = label .. "  ·  " .. f.author end
@@ -197,9 +197,6 @@ function Shelf:show()
                     text = label,
                     callback = function()
                         Shelf:openChapterDialog(f)
-                    end,
-                    hold_callback = function()
-                        Shelf:toggleFavorite(f)
                     end,
                 })
             end
@@ -227,11 +224,6 @@ function Shelf:show()
                             callback = function()
                                 Shelf:openChapterDialog(book)
                             end,
-                            hold_callback = function()
-                                Shelf:toggleFavorite(book)
-                                UIManager:close(self._shelf_menu)
-                                Shelf:show()
-                            end,
                         })
                     end
                 end
@@ -253,8 +245,6 @@ function Shelf:show()
             else
                 table.insert(items, { text = "(书架为空, 请检查服务器设置)", enabled = false })
             end
-        else
-            table.insert(items, { text = "(提示: 长按书籍可加入/取消 ⭐ 收藏)", enabled = false })
         end
 
         self._shelf_menu = showMenu("Legado 漫画书架", items)
