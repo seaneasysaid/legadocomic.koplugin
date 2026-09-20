@@ -46,7 +46,9 @@ local function placeholder_bb()
 end
 
 function M:fetchImgList(ch_index)
-    local data, err = Api.getBookContent(self.book.bookUrl, ch_index)
+    -- 目录位置 -> Legado 的章节 index (从 0 开始), 否则会整体错位一章
+    local api_index = Api.toApiIndex(self.book.bookUrl, ch_index)
+    local data, err = Api.getBookContent(self.book.bookUrl, api_index)
     if not data then
         return nil, err or "获取章节内容失败"
     end

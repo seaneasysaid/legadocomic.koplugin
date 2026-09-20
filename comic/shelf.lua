@@ -58,6 +58,8 @@ function Shelf:openChapterDialog(book)
             UI.error(err or "章节列表为空")
             return
         end
+        -- 喂给 index 映射表: 目录位置 -> Legado 章节 index
+        Api.seedChapterList(book.bookUrl, chapters)
 
         local p = Progress.get(book)
         local items = {}

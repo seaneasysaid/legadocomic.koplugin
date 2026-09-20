@@ -78,6 +78,53 @@ function M.getBookContent(bookUrl, index)
     return M.getJSON("/getBookContent", { url = bookUrl, index = index, v = os.time() }, 25)
 end
 
+-- ===== 章节索引换算 =====
+-- 注意: /getBookContent 的 index 不是"目录第几项", 而是章节自身的 index 字段
+-- (Legado 内部从 0 开始编号)。两者在多数书里恰好差 1, 但会随书源/刷新目录变化,
+-- 所以一律以 /getChapterList 返回的 chapter.index 为准。
+local chapter_index_map = {} -- bookUrl -> { [目录位置] = API index }
+
+local function buildIndexMap(chapters)
+    local map = {}
+    if type(chapters) ~= "table" then return map end
+    for i, ch in ipairs(chapters) do
+        local api_index
+        if type(ch) == "table" then api_index = tonumber(ch.index) end
+        if api_index == nil then api_index = i - 1 end -- 兜底: Legado 索引从 0 开始
+        map[i] = api_index
+    end
+    return map
+end
+
+-- 书架取到目录后调用, 把映射喂进来 (省掉阅读器再请求一次)
+function M.seedChapterList(bookUrl, chapters)
+    if type(bookUrl) ~= "string" or type(chapters) ~= "table" then return end
+    local map = buildIndexMap(chapters)
+    chapter_index_map[bookUrl] = map
+    -- 诊断: 便于在设备日志里确认书源是否提供了 index 字段
+    local has_index = type(chapters[1]) == "table" and tonumber(chapters[1].index) ~= nil
+    logger.info("comic chapter map:", #chapters, "items | chapter.index field:",
+        has_index and "yes" or "no", "| pos1 ->", map[1], "pos2 ->", map[2])
+end
+
+-- 目录第 position 项 -> /getBookContent 需要的 index
+-- allow_fetch=false 时只查缓存, 不发网络请求 (用于退出时上报进度)
+function M.toApiIndex(bookUrl, position, allow_fetch)
+    position = tonumber(position) or 1
+    local map = chapter_index_map[bookUrl]
+    if not map and allow_fetch ~= false then
+        local chapters = M.getChapterList(bookUrl)
+        if type(chapters) == "table" then
+            map = buildIndexMap(chapters)
+            chapter_index_map[bookUrl] = map
+        else
+            logger.warn("comic: chapter list unavailable, fallback to 0-based index")
+        end
+    end
+    if map and map[position] ~= nil then return map[position] end
+    return position - 1
+end
+
 -- 从正文 html 提取图片地址
 function M.extractImageUrls(content)
     local img_sources = {}
@@ -131,13 +178,15 @@ function M.saveBookProgress(book, chapterIndex, chapterTitle)
         return
     end
     local url = M.buildUrl("/saveBookProgress", { v = os.time() })
+    -- app 侧的 durChapterIndex 用的是章节 index 体系(从 0 开始), 不是目录位置
+    local api_index = M.toApiIndex(book.bookUrl, chapterIndex, false)
     local body = "name=" .. util.urlEncode(book.name)
         .. "&author=" .. util.urlEncode(book.author or "")
         .. "&durChapterPos=0"
-        .. "&durChapterIndex=" .. tostring(chapterIndex)
+        .. "&durChapterIndex=" .. tostring(api_index)
         .. "&durChapterTime=" .. tostring(os.time() * 1000)
         .. "&durChapterTitle=" .. util.urlEncode(chapterTitle or "")
-        .. "&index=" .. tostring(chapterIndex)
+        .. "&index=" .. tostring(api_index)
         .. "&url=" .. util.urlEncode(book.bookUrl)
     httpreq.request({
         url = url,
