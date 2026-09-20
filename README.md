@@ -125,3 +125,14 @@ KOReader → 打开插件菜单（文件管理器顶部「搜索」图标里找 
 - 如涉及侵权请联系删除。
 
 MIT License
+
+## 项目推荐
+
+如果你也在电纸书上看书，这些是我维护的其他 KOReader 项目，欢迎一并试试：
+
+| 插件 | 简介 |
+| --- | --- |
+| [readingstats.koplugin](https://github.com/seaneasysaid/readingstats.koplugin) | 轻量版阅读统计 · 阅读足迹 —— KOReader 插件：日历阅读统计 + GitHub 风格热力图 + 阅读分析（含年度/月度书籍排行） |
+| [fanqie.koplugin-fixed](https://github.com/seaneasysaid/fanqie.koplugin-fixed) | KOReader 番茄小说插件非官方增强版：适配书山聚合 + 知秋段评，正文无广告，节点测速自动切换（非官方增强版，fork 自 hesan1232/fanqie.koplugin） |
+| [leko-reader-fixed](https://github.com/seaneasysaid/leko-reader-fixed) | 全程本地运行的 KOReader 网络小说插件，支持 Legado 兼容书源，致力于让阅读轻快流畅 |
+| [koreader-remote](https://github.com/seaneasysaid/koreader-remote) | KOReader Wi-Fi 无线控制网站：手机浏览器即可远程操作电纸书（[在线版](https://seaneasysaid.github.io/koreader-remote/)） |
