@@ -134,7 +134,7 @@ function M:_getOrCreateBook(book, md5, now)
 end
 
 function M:_flushSpan(end_now)
-    -- 把 [last_flush, end_now) 这段时间记到当前页
+    -- 把 [last_flush, end_now) 这段时间按"本段翻过的页"均分记录
     if not self.book_id or not self._anchor then return true end
     local duration = end_now - self._anchor
     if duration < MIN_TAIL_SECONDS then
@@ -145,21 +145,35 @@ function M:_flushSpan(end_now)
         duration = self._pending
         self._pending = 0
     end
-    local row = {
-        page = self.current_page or 1,
-        start_time = end_now - duration,
-        duration = duration,
-        total_pages = VIRTUAL_PAGE_COUNT,
-    }
+    -- 本段翻过的页(有序去重); 一张都没翻过则记当前页
+    local pages = {}
+    local seen = {}
+    for _, p in ipairs(self._seen_order or {}) do
+        if not seen[p] then
+            seen[p] = true
+            pages[#pages + 1] = p
+        end
+    end
+    if #pages == 0 then pages = { self.current_page or 1 } end
+    local n = #pages
+    local each = math.floor(duration / n)
+    if each < 1 then each = 1 end
+
     local db, err = self:_open()
     if not db then logger.warn("legadocomic stats unavailable:", err); return nil end
-    logger.info("legadocomic stats: flushing", duration, "s (page", row.page, "book", self.book_id, ")")
+    logger.info("legadocomic stats: flushing", duration, "s (", n, "pages, book", self.book_id, ")")
     local stmt
     local ok, result = pcall(function()
         db:exec("BEGIN IMMEDIATE;")
         stmt = db:prepare([[INSERT OR IGNORE INTO page_stat_data
             (id_book, page, start_time, duration, total_pages) VALUES (?, ?, ?, ?, ?);]])
-        stmt:reset():bind(self.book_id, row.page, row.start_time, row.duration, row.total_pages):step()
+        local base = end_now - duration
+        for i, p in ipairs(pages) do
+            -- 最后一页吸收取整余数, 保证总时长不变
+            local d = (i == n) and (duration - each * (n - 1)) or each
+            if d < 1 then d = 1 end
+            stmt:reset():bind(self.book_id, p, base + (i - 1) * each, d, VIRTUAL_PAGE_COUNT):step()
+        end
         pcall(stmt.close, stmt); stmt = nil
         local count, seconds = db:rowexec(string.format(
             "SELECT count(DISTINCT page), sum(duration) FROM page_stat WHERE id_book = %d;", self.book_id))
@@ -174,6 +188,8 @@ function M:_flushSpan(end_now)
     pcall(db.close, db)
     if ok then
         self._anchor = end_now
+        self._seen = {}
+        self._seen_order = {}
     else
         logger.warn("legadocomic stats write failed:", tostring(result))
     end
@@ -195,14 +211,23 @@ function M:start(book)
     self.current_page = 1
     self._anchor = now
     self._pending = 0
+    self._seen = {}
+    self._seen_order = {}
     logger.info("legadocomic stats: start ok, book_id=", id)
     return true
 end
 
--- 页变化(含跨章): 只更新当前页号, 不重置计时
+-- 页变化(含跨章): 记录本段看过的每一页, 不重置计时
+-- 这样一分钟内连翻几十张, 也会如实记几十页, 而不是只算最后一张
 function M:onPageChanged(page)
     if not self.book_id then return end
-    self.current_page = math.max(1, tonumber(page) or self.current_page or 1)
+    local p = math.max(1, tonumber(page) or self.current_page or 1)
+    if p ~= self.current_page then
+        self._seen = self._seen or {}
+        self._seen_order = self._seen_order or {}
+        self._seen_order[#self._seen_order + 1] = p
+        self.current_page = p
+    end
 end
 
 -- 翻页时顺带检查: 满 60s 落一条
