@@ -29,9 +29,35 @@ local function showMenu(title, items)
     return menu
 end
 
+-- 过滤出有效书籍条目(名称为非空字符串), 统一成 {name, author, bookUrl, origin}
+local function valid_books(books)
+    local out = {}
+    if type(books) == "table" then
+        for _, b in ipairs(books) do
+            if type(b) == "table" and type(b.name) == "string" and b.name ~= "" then
+                out[#out + 1] = {
+                    name = b.name,
+                    author = b.author or "",
+                    bookUrl = b.bookUrl,
+                    origin = b.origin,
+                }
+            end
+        end
+    end
+    return out
+end
+
 -- 关闭 Shelf 打开过的所有菜单, 防止叠层导致 X 要点多次
 function Shelf:closeAllMenus()
-    for _, k in ipairs({ "_shelf_menu", "_chapter_menu", "_settings_menu", "_fav_menu" }) do
+    for _, k in ipairs({
+        "_shelf_menu",     -- 顶层
+        "_list_menu",      -- ☰ 书架
+        "_favlist_menu",   -- ⭐ 收藏
+        "_chapter_menu",   -- 章节列表
+        "_settings_menu",  -- 设置
+        "_fav_menu",       -- 收藏管理
+    }) do
+
         local m = self[k]
         if m then
             pcall(function() UIManager:close(m) end)
@@ -91,56 +117,169 @@ function Shelf:openChapterDialog(book)
     end)
 end
 
--- 收藏管理: 纯点击切换收藏
+-- 收藏管理: 纯点击切换收藏 (从「⭐ 收藏」菜单进入)
 function Shelf:openFavManager(books)
-    -- 分级导航: 保留书架在下层
+    -- 分级导航: 保留「收藏」菜单在下层
     if self._fav_menu then
         pcall(function() UIManager:close(self._fav_menu) end)
         self._fav_menu = nil
     end
-    if type(books) ~= "table" or #books == 0 then
+
+    local all = valid_books(books)
+    local degraded = false
+    if #all == 0 then
+        -- 书架还没刷新过: 退化成"只能取消已有收藏", 而不是直接把人挡在门外
+        all = valid_books(Favs.list())
+        degraded = #all > 0
+    end
+
+    if #all == 0 then
         UI.info("书架为空, 无法管理收藏")
         return
     end
+
     local function render()
         local items = {}
-        for _, b in ipairs(books) do
-            if type(b) == "table" and type(b.name) == "string" and b.name ~= "" then
-                local book = {
-                    name = b.name,
-                    author = b.author or "",
-                    bookUrl = b.bookUrl,
-                    origin = b.origin,
-                }
-                local is_fav = Favs.has(book)
-                local label = (is_fav and "⭐ " or "☆ ") .. book.name
-                if book.author ~= "" then label = label .. "  ·  " .. book.author end
-                table.insert(items, {
-                    text = label,
-                    callback = function()
-                        Shelf:toggleFavorite(book)
-                        -- 就地刷新列表
-                        if self._fav_menu then
-                            UIManager:close(self._fav_menu)
-                        end
-                        render()
-                    end,
-                })
-            end
+        if degraded then
+            table.insert(items, { text = "(书架未刷新, 仅列出已收藏的书)", enabled = false })
+        end
+        for _, book in ipairs(all) do
+            local is_fav = Favs.has(book)
+            local label = (is_fav and "⭐ " or "☆ ") .. book.name
+            if book.author ~= "" then label = label .. "  ·  " .. book.author end
+            table.insert(items, {
+                text = label,
+                callback = function()
+                    Shelf:toggleFavorite(book)
+                    -- 就地刷新列表
+                    if self._fav_menu then
+                        UIManager:close(self._fav_menu)
+                    end
+                    render()
+                end,
+            })
         end
         table.insert(items, {
-            text = "←  返回书架",
+            text = "←  返回收藏",
             callback = function()
                 if self._fav_menu then
                     UIManager:close(self._fav_menu)
                     self._fav_menu = nil
                 end
-                Shelf:show()
+                Shelf:openFavList(books)
             end,
         })
         self._fav_menu = showMenu("收藏管理 (⭐=已收藏, 点击切换)", items)
     end
     render()
+end
+
+-- 「⭐ 收藏」菜单: 管理入口 + 我的收藏
+function Shelf:openFavList(books)
+    -- 分级导航: 保留顶层在下层
+    if self._favlist_menu then
+        pcall(function() UIManager:close(self._favlist_menu) end)
+        self._favlist_menu = nil
+    end
+
+    local favs = valid_books(Favs.list())
+    local items = {
+        {
+            text = "✎  收藏管理 (点击书名切换收藏)",
+            callback = function()
+                Shelf:openFavManager(books)
+            end,
+        },
+    }
+
+    if #favs > 0 then
+        table.insert(items, { text = "── ⭐ 我的收藏 ──", enabled = false })
+        for _, f in ipairs(favs) do
+            local label = "⭐ " .. f.name
+            if f.author ~= "" then label = label .. "  ·  " .. f.author end
+            local p = Progress.get(f)
+            if p and p.ch then
+                label = label .. "  [第" .. tostring(p.ch) .. "话]"
+            end
+            table.insert(items, {
+                text = label,
+                callback = function()
+                    Shelf:openChapterDialog(f)
+                end,
+            })
+        end
+    else
+        table.insert(items, { text = "(还没有收藏, 点上方「✎ 收藏管理」添加)", enabled = false })
+    end
+
+    table.insert(items, {
+        text = "←  返回",
+        callback = function()
+            if self._favlist_menu then
+                UIManager:close(self._favlist_menu)
+                self._favlist_menu = nil
+            end
+            Shelf:show()
+        end,
+    })
+
+    self._favlist_menu = showMenu(string.format("⭐ 收藏 (%d 本)", #favs), items)
+end
+
+-- 「☰ 书架」菜单: 刷新入口 + 全部书籍
+-- 已收藏的书加 ⭐ 前缀提示, 但仍在这里可点 (收藏是独立视图, 不再把书从书架里抽走)
+function Shelf:openShelfList(books)
+    -- 分级导航: 保留顶层在下层
+    if self._list_menu then
+        pcall(function() UIManager:close(self._list_menu) end)
+        self._list_menu = nil
+    end
+
+    local all = valid_books(books)
+    local items = {
+        {
+            text = "⟳  刷新书架",
+            callback = function()
+                Shelf:refreshShelf()
+            end,
+        },
+    }
+
+    if #all > 0 then
+        table.insert(items, { text = "── 全部书籍 ──", enabled = false })
+        for _, book in ipairs(all) do
+            local label = book.name
+            if book.author ~= "" then label = label .. "  ·  " .. book.author end
+            local p = Progress.get(book)
+            if p and p.ch then
+                label = label .. "  [读到第" .. tostring(p.ch) .. "话]"
+            end
+            if Favs.has(book) then label = "⭐ " .. label end
+            table.insert(items, {
+                text = label,
+                callback = function()
+                    Shelf:openChapterDialog(book)
+                end,
+            })
+        end
+    elseif books == nil then
+        table.insert(items, { text = "(尚无书架缓存, 点上方「⟳ 刷新书架」获取)", enabled = false })
+    else
+        table.insert(items, { text = "(书架为空, 请检查服务器设置)", enabled = false })
+    end
+
+    table.insert(items, {
+        text = "←  返回",
+        callback = function()
+            if self._list_menu then
+                UIManager:close(self._list_menu)
+                self._list_menu = nil
+            end
+            Shelf:show()
+        end,
+    })
+
+    self._list_menu = showMenu(string.format("☰ 书架 (%d 本)", #all), items)
 end
 
 function Shelf:openReader(book, ch, img, total_ch)
@@ -164,101 +303,43 @@ function Shelf:toggleFavorite(book, on_done)
     if type(on_done) == "function" then on_done() end
 end
 
+-- 顶层: 只有 ⭐收藏 / ☰书架 / ⚙设置 三个固定入口.
+-- 书全部收进「☰ 书架」子菜单、收藏收进「⭐ 收藏」子菜单,
+-- 所以书架上有 3 本还是 300 本, 这一层的样子都不变.
 function Shelf:show()
     if NetworkMgr:willRerunWhenConnected() then return end
     self:closeAllMenus()
 
-    local function renderShelf(books)
-        local items = {
-            {
-                text = "⟳  刷新书架",
-                callback = function()
-                    Shelf:refreshShelf()
-                end,
-            },
-            {
-                text = "⚙  设置 (服务器/预取/缓存)",
-                callback = function()
-                    Shelf:openSettings()
-                end,
-            },
-        }
-
-        -- 收藏快捷方式区
-        local favs = Favs.list()
-        if #favs > 0 then
-            table.insert(items, { text = "── ⭐ 收藏 ──", enabled = false })
-            for _, f in ipairs(favs) do
-                local label = "⭐ " .. f.name
-                if tostring(f.author or "") ~= "" then label = label .. "  ·  " .. f.author end
-                local p = Progress.get(f)
-                if p and p.ch then
-                    label = label .. "  [第" .. tostring(p.ch) .. "话]"
-                end
-                table.insert(items, {
-                    text = label,
-                    callback = function()
-                        Shelf:openChapterDialog(f)
-                    end,
-                })
-            end
-        end
-
-        if type(books) == "table" then
-            for _, b in ipairs(books) do
-                if type(b) == "table" and type(b.name) == "string" and b.name ~= "" then
-                    local book = {
-                        name = b.name,
-                        author = b.author or "",
-                        bookUrl = b.bookUrl,
-                        origin = b.origin,
-                    }
-                    -- 已收藏的书只在顶部收藏区显示, 不重复列出
-                    if not Favs.has(book) then
-                        local label = b.name
-                        if book.author ~= "" then label = label .. "  ·  " .. book.author end
-                        local p = Progress.get(book)
-                        if p and p.ch then
-                            label = label .. "  [读到第" .. tostring(p.ch) .. "话]"
-                        end
-                        table.insert(items, {
-                            text = label,
-                            callback = function()
-                                Shelf:openChapterDialog(book)
-                            end,
-                        })
-                    end
-                end
-            end
-        end
-
-        if type(books) == "table" and #books > 0 then
-            table.insert(items, {
-                text = "⭐ 收藏管理 (点击书名切换收藏)",
-                callback = function()
-                    Shelf:openFavManager(books)
-                end,
-            })
-        end
-
-        if #items == 2 then
-            if books == nil then
-                table.insert(items, { text = "(尚无书架缓存, 点上方「刷新书架」获取)", enabled = false })
-            else
-                table.insert(items, { text = "(书架为空, 请检查服务器设置)", enabled = false })
-            end
-        end
-
-        self._shelf_menu = showMenu("Legado 漫画书架", items)
-        self._shelf_books = books
-    end
-
-    -- 打开时只显示上次缓存的书籍, 不自动联网; 点「刷新书架」才拉取
+    -- 顶层不列书, 只读上次缓存的书架算个数; 仍然不自动联网
     local cached = settings.open():readSetting("shelf_cache")
-    renderShelf(type(cached) == "table" and cached.books or nil)
+    local books = (type(cached) == "table") and cached.books or nil
+
+    local items = {
+        {
+            text = string.format("⭐  收藏 (%d 本)", #valid_books(Favs.list())),
+            callback = function()
+                Shelf:openFavList(books)
+            end,
+        },
+        {
+            text = string.format("☰  书架 (%d 本)", #valid_books(books)),
+            callback = function()
+                Shelf:openShelfList(books)
+            end,
+        },
+        {
+            text = "⚙  设置 (服务器/预取/缓存)",
+            callback = function()
+                Shelf:openSettings()
+            end,
+        },
+    }
+
+    self._shelf_menu = showMenu("Legado 漫画书架", items)
+    self._shelf_books = books
 end
 
--- 手动刷新书架
+-- 手动刷新书架 (从「☰ 书架」菜单进入, 刷完留在这一层)
 function Shelf:refreshShelf()
     Shelf:closeAllMenus()
     UI.loading("获取书架", function()
@@ -269,9 +350,11 @@ function Shelf:refreshShelf()
         if ok and type(books) == "table" then
             settings.set("shelf_cache", { books = books, ts = os.time() })
             Shelf._books = books
-            Shelf:show()
+            Shelf:openShelfList(books)
         else
-            Shelf:show()
+            -- 刷新失败也别把人踢出书架层, 用缓存继续展示
+            local cached = settings.open():readSetting("shelf_cache")
+            Shelf:openShelfList((type(cached) == "table") and cached.books or nil)
             UI.error(err or "获取书架失败, 请检查设置")
         end
     end)
@@ -392,7 +475,7 @@ function Shelf:openSettings()
         end,
     })
     table.insert(items, {
-        text = "←  返回书架",
+        text = "←  返回",
         callback = function()
             if self._settings_menu then
                 UIManager:close(self._settings_menu)
