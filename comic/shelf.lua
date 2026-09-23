@@ -240,13 +240,20 @@ function Shelf:openFavManager(books)
 
     -- 和书架一样受「只看漫画」开关约束: 这里列的是可勾选的书架条目
     local all = apply_comic_filter(books)
-    local degraded = false
-    if #all == 0 then
-        -- 书架还没刷新过: 退化成"只能取消已有收藏", 而不是直接把人挡在门外
-        all = valid_books(Favs.list())
-        degraded = #all > 0
+    -- 退化标记只看书架本身有没有书, 不能被下面补进来的收藏掩盖
+    local degraded = #all == 0
+    -- 补上「已收藏、但书架里已经没有的书」: 否则书一从 App 书架删掉, 这里就再也取消不掉收藏了
+    local seen = {}
+    for _, b in ipairs(all) do
+        if b.bookUrl ~= nil then seen[tostring(b.bookUrl)] = true end
     end
-
+    for _, f in ipairs(valid_books(Favs.list())) do
+        local k = tostring(f.bookUrl or "")
+        if k ~= "" and not seen[k] then
+            f.gone = true
+            all[#all + 1] = f
+        end
+    end
     if #all == 0 then
         UI.info("书架为空, 无法管理收藏")
         return
@@ -266,12 +273,13 @@ function Shelf:openFavManager(books)
             },
         }
         if degraded then
-            table.insert(items, { text = "(书架未刷新, 仅列出已收藏的书)", enabled = false })
+            table.insert(items, { text = "(书架里没有可显示的书, 以下仅列出已收藏的)", enabled = false })
         end
         for _, book in ipairs(all) do
             local is_fav = Favs.has(book)
             local label = (is_fav and "⭐ " or "☆ ") .. book.name
             if book.author ~= "" then label = label .. "  ·  " .. book.author end
+            if book.gone then label = label .. "  (书架已无)" end
             table.insert(items, {
                 text = label,
                 callback = function()
