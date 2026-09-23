@@ -30,7 +30,7 @@ local function showMenu(title, items)
     return menu
 end
 
--- 过滤出有效书籍条目(名称为非空字符串), 统一成 {name, author, bookUrl, origin}
+-- 过滤出有效书籍条目(名称为非空字符串), 统一成 {name, author, bookUrl, origin, type, ...}
 local function valid_books(books)
     local out = {}
     if type(books) == "table" then
@@ -41,6 +41,7 @@ local function valid_books(books)
                     author = b.author or "",
                     bookUrl = b.bookUrl,
                     origin = b.origin,
+                    type = b.type, -- Legado 位标记, 判漫画要用(见 is_comic)
                     -- App 侧阅读进度(来自 /getBookshelf), 供打开时续读
                     durChapterIndex = b.durChapterIndex,
                     durChapterPos = b.durChapterPos,
@@ -51,6 +52,44 @@ local function valid_books(books)
         end
     end
     return out
+end
+
+-- ===== 漫画识别 =====
+-- Legado 的 Book.type 是位标记(不是枚举)。本机实测 100 本的取值分布:
+--   8   = 文本小说 (书山聚合 / 笔趣阁 / 蚂蚁阅读 ...)
+--   24  = 8+16    (三五文学 / 文墨中文 / 雅谷中文 ..., 同为小说)
+--   64  = 图片=漫画 (禁漫天堂, kind 标签为"全彩/韩漫/剧情向")
+--   264 = 8+256   (本地导入的 epub)
+-- 结论: 判漫画只看位 64。注意接口里没有 bookSourceType 字段, 别去找它。
+local TYPE_IMAGE_BIT = 64
+
+-- KOReader 可能是 Lua 5.1(没有 & 位运算符), 用取模判断某一位是否置位(b 必须是 2 的幂)
+local function has_bit(v, b)
+    if type(v) ~= "number" or v < 0 then return false end
+    return v % (b * 2) >= b
+end
+
+-- 是不是漫画: 只看 type 的图片位。
+-- 实测(100 本真机数据): 位 64 的 3 本全部来自漫画源且零漏判, 所以不再做书源白名单兜底。
+local function is_comic(book)
+    if type(book) ~= "table" then return false end
+    local t = tonumber(book.type)
+    -- 接口没给 type 就别乱滤(宁可多显示), 否则某些 App 版本会整架书消失
+    if t == nil then return true end
+    return has_bit(t, TYPE_IMAGE_BIT)
+end
+
+-- 按「只看漫画」开关过滤书架。返回 (要展示的书, 被隐藏的本数)。
+-- 「☰ 书架」和「✎ 收藏管理」(勾选列表) 都走这里。
+-- 例外:「⭐ 收藏」视图不过滤——已收藏的书必须永远可达, 否则开着过滤就再也取消不掉收藏了。
+local function apply_comic_filter(books)
+    local all = valid_books(books)
+    if settings.get("comic_only") == false then return all, 0 end
+    local out, hidden = {}, 0
+    for _, b in ipairs(all) do
+        if is_comic(b) then out[#out + 1] = b else hidden = hidden + 1 end
+    end
+    return out, hidden
 end
 
 -- 计算"续读点": 取 本机进度 与 App 进度(durChapter*) 中较新的一份。
@@ -199,7 +238,8 @@ function Shelf:openFavManager(books)
         self._fav_menu = nil
     end
 
-    local all = valid_books(books)
+    -- 和书架一样受「只看漫画」开关约束: 这里列的是可勾选的书架条目
+    local all = apply_comic_filter(books)
     local degraded = false
     if #all == 0 then
         -- 书架还没刷新过: 退化成"只能取消已有收藏", 而不是直接把人挡在门外
@@ -213,7 +253,18 @@ function Shelf:openFavManager(books)
     end
 
     local function render()
-        local items = {}
+        local items = {
+            {
+                text = "←  返回收藏",
+                callback = function()
+                    if self._fav_menu then
+                        UIManager:close(self._fav_menu)
+                        self._fav_menu = nil
+                    end
+                    Shelf:openFavList(books)
+                end,
+            },
+        }
         if degraded then
             table.insert(items, { text = "(书架未刷新, 仅列出已收藏的书)", enabled = false })
         end
@@ -233,16 +284,6 @@ function Shelf:openFavManager(books)
                 end,
             })
         end
-        table.insert(items, {
-            text = "←  返回收藏",
-            callback = function()
-                if self._fav_menu then
-                    UIManager:close(self._fav_menu)
-                    self._fav_menu = nil
-                end
-                Shelf:openFavList(books)
-            end,
-        })
         self._fav_menu = showMenu("收藏管理 (⭐=已收藏, 点击切换)", items)
     end
     render()
@@ -260,6 +301,16 @@ function Shelf:openFavList(books)
     local enrich = enrich_from_shelf(books)
     for _, f in ipairs(favs) do enrich(f) end
     local items = {
+        {
+            text = "←  返回",
+            callback = function()
+                if self._favlist_menu then
+                    UIManager:close(self._favlist_menu)
+                    self._favlist_menu = nil
+                end
+                Shelf:show()
+            end,
+        },
         {
             text = "✎  收藏管理 (点击书名切换收藏)",
             callback = function()
@@ -288,17 +339,6 @@ function Shelf:openFavList(books)
         table.insert(items, { text = "(还没有收藏, 点上方「✎ 收藏管理」添加)", enabled = false })
     end
 
-    table.insert(items, {
-        text = "←  返回",
-        callback = function()
-            if self._favlist_menu then
-                UIManager:close(self._favlist_menu)
-                self._favlist_menu = nil
-            end
-            Shelf:show()
-        end,
-    })
-
     self._favlist_menu = showMenu(string.format("⭐ 收藏 (%d 本)", #favs), items)
 end
 
@@ -311,8 +351,27 @@ function Shelf:openShelfList(books)
         self._list_menu = nil
     end
 
-    local all = valid_books(books)
+    local all, hidden = apply_comic_filter(books)
+    local filter_on = settings.get("comic_only") ~= false
     local items = {
+        {
+            text = "←  返回",
+            callback = function()
+                if self._list_menu then
+                    UIManager:close(self._list_menu)
+                    self._list_menu = nil
+                end
+                Shelf:show()
+            end,
+        },
+        {
+            -- 别用 emoji: KOReader 的字体里没有字形, 会显示成空白/豆腐块, 用几何符号
+            text = filter_on and "◉  只看漫画: 开" or "○  只看漫画: 关 (显示全部书)",
+            callback = function()
+                settings.set("comic_only", not filter_on)
+                Shelf:openShelfList(books)
+            end,
+        },
         {
             text = "⟳  刷新书架",
             callback = function()
@@ -322,7 +381,7 @@ function Shelf:openShelfList(books)
     }
 
     if #all > 0 then
-        table.insert(items, { text = "── 全部书籍 ──", enabled = false })
+        table.insert(items, { text = filter_on and "── 漫画 ──" or "── 全部书籍 ──", enabled = false })
         for _, book in ipairs(all) do
             local label = book.name
             if book.author ~= "" then label = label .. "  ·  " .. book.author end
@@ -340,22 +399,23 @@ function Shelf:openShelfList(books)
         end
     elseif books == nil then
         table.insert(items, { text = "(尚无书架缓存, 点上方「⟳ 刷新书架」获取)", enabled = false })
+    elseif hidden > 0 then
+        table.insert(items, { text = string.format("(没识别到漫画, 已隐藏 %d 本其它书)", hidden), enabled = false })
     else
         table.insert(items, { text = "(书架为空, 请检查服务器设置)", enabled = false })
     end
 
-    table.insert(items, {
-        text = "←  返回",
-        callback = function()
-            if self._list_menu then
-                UIManager:close(self._list_menu)
-                self._list_menu = nil
-            end
-            Shelf:show()
-        end,
-    })
+    if hidden > 0 then
+        table.insert(items, {
+            text = string.format("»  已隐藏 %d 本非漫画 · 点此显示全部", hidden),
+            callback = function()
+                settings.set("comic_only", false)
+                Shelf:openShelfList(books)
+            end,
+        })
+    end
 
-    self._list_menu = showMenu(string.format("☰ 书架 (%d 本)", #all), items)
+    self._list_menu = showMenu(string.format(filter_on and "☰ 漫画书架 (%d 本)" or "☰ 书架 (%d 本)", #all), items)
 end
 
 function Shelf:openReader(book, ch, img, total_ch)
@@ -389,6 +449,7 @@ function Shelf:show()
     -- 顶层不列书, 只读上次缓存的书架算个数; 仍然不自动联网
     local cached = settings.open():readSetting("shelf_cache")
     local books = (type(cached) == "table") and cached.books or nil
+    local shown, hidden = apply_comic_filter(books)
 
     local items = {
         {
@@ -398,7 +459,9 @@ function Shelf:show()
             end,
         },
         {
-            text = string.format("☰  书架 (%d 本)", #valid_books(books)),
+            text = (hidden > 0)
+                and string.format("☰  漫画书架 (%d 本 · 隐藏 %d)", #shown, hidden)
+                or string.format("☰  书架 (%d 本)", #shown),
             callback = function()
                 Shelf:openShelfList(books)
             end,
@@ -537,6 +600,7 @@ function Shelf:openSettings()
             end,
         },
     }
+    -- 注: 「只看漫画」开关在书架列表顶部, 这里不重复放
 
     local total, count = require("comic/cache").usage()
     table.insert(items, {

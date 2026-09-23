@@ -2,7 +2,8 @@
 -- 结构参考 legado.koplugin StreamImageView, 修复其章节切换时误用旧图片列表的 bug,
 -- 并加入预取/缓存/进度记忆
 local UIManager = require("ui/uimanager")
-local Screen = require("device").screen
+local Device = require("device")
+local Screen = Device.screen
 local RenderImage = require("ui/renderimage")
 local ImageViewer = require("ui/widget/imageviewer")
 local logger = require("logger")
@@ -163,6 +164,11 @@ end
 
 function M:onClose()
     self._closed = true
+    -- 目录弹层开着的话一并关掉, 免得退回章节目录后还叠着一层
+    if self._toc_menu then
+        pcall(function() UIManager:close(self._toc_menu) end)
+        self._toc_menu = nil
+    end
     if self._prefetch_timer then
         UIManager:unschedule(self._prefetch_timer)
         self._prefetch_timer = nil
@@ -231,6 +237,122 @@ end
 
 function M:onShowPrevImage()
     self:turnPage(-1)
+end
+
+-- ==================== KOReader 事件接入（只接遥控页上有的按钮） ====================
+-- 事件分发链: UIManager:sendEvent(ev) -> 逐层调 widget:handleEvent(ev)
+--   -> 命中 self["on"..ev.name] 才调用, 返回 true 表示"已消费"。
+-- 这个阅读器不是 ReaderUI, ReaderPaging / ReaderToc 那批事件处理器都不在场,
+-- 所以 KOReader 的"翻页/目录"事件一路传到栈底也没人接、会被静默丢弃
+-- (遥控网页的"上一页 / 下一页 / 目录"按钮发的就是这批事件名)。
+-- 这里只按漫画语义补这两条 —— 遥控页上没有的东西不实现。
+-- 注: 全刷 / 夜间 / 亮度 / 色温 这 4 个屏幕级按钮在漫画页没反应——
+-- 它们由 DeviceListener 处理, 而 DeviceListener 只挂在标准
+-- FileManager/ReaderUI 的 active_widgets 上, 这个自绘 widget 没注册它,
+-- 所以 sendEvent 传不到这里 (被静默丢弃), 且要读硬件状态再写回, 暂不实现。
+-- 本 widget 自己实现的事件 handler: 翻页(onGotoViewRel) / 目录(onShowToc) / 休眠(onRequestSuspend)。
+-- 旋转曾实现过, 但 e-ink 局部刷新会留残影, 已按需求删除。
+
+-- 相对翻 n 张 (n 可正可负, 覆盖 GotoViewRel/10 这类跳页)
+function M:turnPages(n)
+    n = tonumber(n) or 0
+    if n == 0 then return end
+    if n == 1 then return self:turnPage(1) end
+    if n == -1 then return self:turnPage(-1) end
+
+    local dir = n > 0 and 1 or -1
+    local target_img = self.cur_img + n
+    if target_img >= 1 and target_img <= #self.imglist then
+        return self:gotoPage(self.cur_ch, target_img, dir) -- 章内够翻
+    end
+    -- 跨章: 不做"多章累加"(那得把中间章节全拉下来数图), 直接落到相邻章首页/末页, 行为可预期
+    if dir > 0 then
+        if self.total_ch and self.cur_ch >= self.total_ch then
+            UI.info("已经是最后一章")
+            return
+        end
+        return self:gotoPage(self.cur_ch + 1, 1, 1)
+    end
+    if self.cur_ch <= 1 then
+        UI.info("已经是第一章")
+        return
+    end
+    return self:gotoPage(self.cur_ch - 1, -1, -1) -- -1 = 该章末页
+end
+
+-- 翻页: 遥控页"上一页 / 下一页"按钮发的是 GotoViewRel
+-- (GotoViewRel/1 = 下一张, /-1 = 上一张)
+function M:onGotoViewRel(diff)
+    if not diff or diff == 0 then return true end
+    self:turnPages(diff)
+    return true
+end
+
+-- 休眠: 遥控页"休眠"按钮发 RequestSuspend。同样本 widget 收不到屏幕级事件,
+-- 直接调框架挂起 (与 DeviceListener:onRequestSuspend 同逻辑)。
+function M:onRequestSuspend()
+    UIManager:suspend()
+    return true
+end
+
+-- 目录: 在阅读器内弹出话目录, 选中即跳话 (不退出阅读器)
+function M:onShowToc()
+    self:showTocMenu()
+    return true
+end
+
+function M:showTocMenu()
+    if self._toc_menu then
+        pcall(function() UIManager:close(self._toc_menu) end)
+        self._toc_menu = nil
+    end
+    UI.loading("获取章节列表", function()
+        return Api.getChapterList(self.book.bookUrl)
+    end, function(ok, chapters, err)
+        -- 取目录是异步的(scheduleIn 0.1s), 这期间用户可能已经退出阅读器;
+        -- 不再弹菜单, 否则会在章节目录上凭空多出一层
+        if self._closed then return end
+        if not ok or type(chapters) ~= "table" or #chapters == 0 then
+            UI.error(err or "章节列表为空")
+            return
+        end
+        Api.seedChapterList(self.book.bookUrl, chapters) -- 供 index 换算
+        local items = {}
+        for i, ch in ipairs(chapters) do
+            local title = tostring(ch.title or ("第 " .. i .. " 话"))
+            if #title > 40 then title = title:sub(1, 40) .. "…" end
+            local idx = i
+            table.insert(items, {
+                text = string.format("%s%d. %s", (i == self.cur_ch and "▸ " or ""), idx, title),
+                callback = function()
+                    if self._toc_menu then
+                        UIManager:close(self._toc_menu)
+                        self._toc_menu = nil
+                    end
+                    if idx ~= self.cur_ch then
+                        self:gotoPage(idx, 1, idx > self.cur_ch and 1 or -1)
+                    end
+                end,
+            })
+        end
+        local Menu = require("ui/widget/menu")
+        self._toc_menu = Menu:new{
+            title = "目录 · " .. tostring(self.book.name or ""),
+            item_table = items,
+            is_borderless = true,
+            is_popout = false,
+            fullscreen = true,
+            width = Screen:getWidth(),
+            height = Screen:getHeight(),
+            items_per_page = 14,
+            single_line = true,
+            -- 弹层被它自己的路径关掉时(点弹层外 / 硬件 Back 键 -> Menu:onCloseAllMenus)
+            -- 也要跟着收回引用, 否则 _toc_menu 悬空: 下次 ShowToc 会先去 close 一个
+            -- 已经关掉的弹层
+            close_callback = function() self._toc_menu = nil end,
+        }
+        UIManager:show(self._toc_menu)
+    end)
 end
 
 -- 方向翻页: step = ±1, 跨章无缝

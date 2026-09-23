@@ -13,6 +13,7 @@ local DEFAULTS = {
     proxy_image = true, -- 走 legado app /image 代理(按屏宽缩放, 省流量)
     sync_progress = true, -- 关闭阅读器时同步进度到 app
     auto_clear_chapter = true, -- 换章后自动删除前两章之前的缓存
+    comic_only = true,   -- 书架只显示漫画(默认开, 小说源太多时很有用); 开关在书架列表顶部
 }
 
 function M.open(path)
