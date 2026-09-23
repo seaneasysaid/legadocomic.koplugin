@@ -1,7 +1,6 @@
 -- legado 安卓 app Web 服务客户端(仅漫画所需接口)
 local logger = require("logger")
 local util = require("util")
-local socket_url = require("socket.url")
 local Screen = require("device").screen
 local httpreq = require("comic/httpreq")
 local settings = require("comic/settings")
@@ -83,6 +82,7 @@ end
 -- (Legado 内部从 0 开始编号)。两者在多数书里恰好差 1, 但会随书源/刷新目录变化,
 -- 所以一律以 /getChapterList 返回的 chapter.index 为准。
 local chapter_index_map = {} -- bookUrl -> { [目录位置] = API index }
+local chapter_pos_map = {}   -- bookUrl -> { [API index] = 目录位置 } (反向, 供 App 进度定位)
 
 local function buildIndexMap(chapters)
     local map = {}
@@ -96,11 +96,26 @@ local function buildIndexMap(chapters)
     return map
 end
 
+-- 反向映射: API index(0-based) -> 目录位置(1-based)
+-- 用于把 App 端 durChapterIndex 反向定位回 Kindle 的目录位置
+local function buildPosMap(chapters)
+    local map = {}
+    if type(chapters) ~= "table" then return map end
+    for i, ch in ipairs(chapters) do
+        local api_index
+        if type(ch) == "table" then api_index = tonumber(ch.index) end
+        if api_index == nil then api_index = i - 1 end
+        map[api_index] = i
+    end
+    return map
+end
+
 -- 书架取到目录后调用, 把映射喂进来 (省掉阅读器再请求一次)
 function M.seedChapterList(bookUrl, chapters)
     if type(bookUrl) ~= "string" or type(chapters) ~= "table" then return end
     local map = buildIndexMap(chapters)
     chapter_index_map[bookUrl] = map
+    chapter_pos_map[bookUrl] = buildPosMap(chapters)
     -- 诊断: 便于在设备日志里确认书源是否提供了 index 字段
     local has_index = type(chapters[1]) == "table" and tonumber(chapters[1].index) ~= nil
     logger.info("comic chapter map:", #chapters, "items | chapter.index field:",
@@ -117,12 +132,32 @@ function M.toApiIndex(bookUrl, position, allow_fetch)
         if type(chapters) == "table" then
             map = buildIndexMap(chapters)
             chapter_index_map[bookUrl] = map
+            chapter_pos_map[bookUrl] = buildPosMap(chapters)
         else
             logger.warn("comic: chapter list unavailable, fallback to 0-based index")
         end
     end
     if map and map[position] ~= nil then return map[position] end
     return position - 1
+end
+
+-- API index (0-based, /getBookContent 用的 index) -> 目录第几项 (1-based)
+-- 用途: 把 App 端 durChapterIndex 反向定位回 Kindle 的目录位置, 供"续读"使用。
+-- allow_fetch=false 时只查缓存, 不发网络请求。
+function M.toPosition(bookUrl, api_index, allow_fetch)
+    api_index = tonumber(api_index)
+    if api_index == nil then return nil end
+    local map = chapter_pos_map[bookUrl]
+    if not map and allow_fetch ~= false then
+        local chapters = M.getChapterList(bookUrl)
+        if type(chapters) == "table" then
+            chapter_index_map[bookUrl] = buildIndexMap(chapters)
+            map = buildPosMap(chapters)
+            chapter_pos_map[bookUrl] = map
+        end
+    end
+    if map and map[api_index] ~= nil then return map[api_index] end
+    return api_index + 1 -- 兜底: 多数书 index = 位置-1
 end
 
 -- 从正文 html 提取图片地址
@@ -172,29 +207,37 @@ function M.downloadImageData(bookUrl, imgSrc)
 end
 
 -- 同步进度到 app (best-effort)
-function M.saveBookProgress(book, chapterIndex, chapterTitle)
+-- chapterIndex: 1-based 目录位置(toApiIndex 期望, 与 fetchImgList 一致); chapterPos: 章内位置(漫画=图片序号)
+function M.saveBookProgress(book, chapterIndex, chapterTitle, chapterPos)
     if settings.get("sync_progress") == false then return end
     if not (type(book) == "table" and type(book.name) == "string" and type(book.bookUrl) == "string") then
         return
     end
-    local url = M.buildUrl("/saveBookProgress", { v = os.time() })
-    -- app 侧的 durChapterIndex 用的是章节 index 体系(从 0 开始), 不是目录位置
+    -- app 侧 /saveBookProgress 收的是 JSON body (Content-Type: application/json), 不是表单
     local api_index = M.toApiIndex(book.bookUrl, chapterIndex, false)
-    local body = "name=" .. util.urlEncode(book.name)
-        .. "&author=" .. util.urlEncode(book.author or "")
-        .. "&durChapterPos=0"
-        .. "&durChapterIndex=" .. tostring(api_index)
-        .. "&durChapterTime=" .. tostring(os.time() * 1000)
-        .. "&durChapterTitle=" .. util.urlEncode(chapterTitle or "")
-        .. "&index=" .. tostring(api_index)
-        .. "&url=" .. util.urlEncode(book.bookUrl)
-    httpreq.request({
-        url = url,
+    local JSON = require("json")
+    local body = JSON.encode({
+        name = book.name,
+        author = book.author or "",
+        url = book.bookUrl,
+        durChapterIndex = api_index,
+        durChapterPos = chapterPos or 0,
+        durChapterTitle = chapterTitle or "",
+        durChapterTime = os.time() * 1000,
+    })
+    local ok, resp = httpreq.request({
+        url = M.buildUrl("/saveBookProgress", { v = os.time() }),
         method = "POST",
+        headers = { ["Content-Type"] = "application/json" },
         body = body,
         timeout = 6,
         maxtime = 10,
     })
+    if not ok then
+        logger.warn("comic saveBookProgress failed:", tostring(resp))
+    else
+        logger.info("comic saveBookProgress ->", book.name, "index", api_index)
+    end
 end
 
 return M

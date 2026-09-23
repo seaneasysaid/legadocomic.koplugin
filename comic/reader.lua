@@ -12,14 +12,6 @@ local Cache = require("comic/cache")
 local Progress = require("comic/progress")
 local StatBridge = require("comic/statbridge")
 
--- 按键诊断日志: 记录阅读器收到的原始按键名
-local DataStorage = require("datastorage")
-local KEYLOG = DataStorage:getDataDir() .. "/legadocomic_keys.log"
-local function logKey(line)
-    local f = io.open(KEYLOG, "a")
-    if f then f:write(os.date("%H:%M:%S "), line, "\n") f:close() end
-end
-
 local UI = require("comic/ui")
 local settings = require("comic/settings")
 
@@ -103,7 +95,6 @@ function M:onZoomOut() self:turnPage(-1) return true end
 -- 直接拦截按键: 按名字模式匹配翻页, 其余交回 ImageViewer
 function M:onKeyPress(key)
     local name = tostring(key.key or key.text or "?")
-    logKey("key=" .. name .. " text=" .. tostring(key.text))
     local n = name:lower()
     if n:find("pgfwd") or n == "pagedown" then
         self:turnPage(1)
@@ -180,7 +171,7 @@ function M:onClose()
     if self.book and self.imglist and #self.imglist > 0 then
         pcall(function()
             Progress.save(self.book, self.cur_ch, self.cur_img, self.chapter_title)
-            Api.saveBookProgress(self.book, self.cur_ch - 1, self.chapter_title)
+            Api.saveBookProgress(self.book, self.cur_ch, self.chapter_title, self.cur_img)
         end)
     end
     pcall(function() StatBridge:close() end)

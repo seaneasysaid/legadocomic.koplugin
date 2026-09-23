@@ -3,6 +3,7 @@ local UIManager = require("ui/uimanager")
 local Screen = require("device").screen
 local NetworkMgr = require("ui/network/manager")
 local Menu = require("ui/widget/menu")
+local logger = require("logger")
 
 local Api = require("comic/api")
 local Progress = require("comic/progress")
@@ -40,11 +41,77 @@ local function valid_books(books)
                     author = b.author or "",
                     bookUrl = b.bookUrl,
                     origin = b.origin,
+                    -- App 侧阅读进度(来自 /getBookshelf), 供打开时续读
+                    durChapterIndex = b.durChapterIndex,
+                    durChapterPos = b.durChapterPos,
+                    durChapterTitle = b.durChapterTitle,
+                    durChapterTime = b.durChapterTime,
                 }
             end
         end
     end
     return out
+end
+
+-- 计算"续读点": 取 本机进度 与 App 进度(durChapter*) 中较新的一份。
+-- 本机 ts 是秒; App durChapterTime 可能是毫秒(13位)或秒(10位), 统一成秒后再比。
+-- 返回 { ch = 目录位置(1-based), img = 章内位置, title = 章节标题, from_app = bool } 或 nil。
+local function resolveResume(book)
+    if type(book) ~= "table" then return nil end
+    local local_p = Progress.get(book)
+
+    local app_ch, app_img, app_title, app_ts
+    if book.durChapterIndex ~= nil then
+        local pos = Api.toPosition(book.bookUrl, book.durChapterIndex, false)
+        if pos then
+            app_ch = pos
+            app_img = tonumber(book.durChapterPos) or 1
+            if app_img < 1 then app_img = 1 end
+            app_title = book.durChapterTitle
+            app_ts = tonumber(book.durChapterTime)
+            if app_ts and app_ts > 1e11 then app_ts = app_ts / 1000 end -- ms -> s
+        end
+    end
+
+    local local_ts = local_p and tonumber(local_p.ts) or nil
+    local use_app = false
+    if app_ch then
+        if not (local_p and local_p.ch) then
+            use_app = true                                  -- 只有 App 有进度
+        elseif app_ts and local_ts and app_ts > local_ts then
+            use_app = true                                  -- App 更新
+        end
+    end
+
+    if use_app then
+        return { ch = app_ch, img = app_img or 1, title = app_title, from_app = true }
+    end
+    if local_p and local_p.ch then
+        return { ch = local_p.ch, img = local_p.img or 1, title = local_p.title, from_app = false }
+    end
+    return nil
+end
+
+-- 用书架缓存里的 App 进度字段补齐书条目(收藏条目自身不存这些字段, 需要时从书架取)
+local function enrich_from_shelf(books)
+    local by_url = {}
+    if type(books) == "table" then
+        for _, b in ipairs(books) do
+            if type(b) == "table" and b.bookUrl then by_url[b.bookUrl] = b end
+        end
+    end
+    return function(book)
+        if type(book) == "table" and book.bookUrl and book.durChapterIndex == nil then
+            local src = by_url[book.bookUrl]
+            if src then
+                book.durChapterIndex = src.durChapterIndex
+                book.durChapterPos = src.durChapterPos
+                book.durChapterTitle = src.durChapterTitle
+                book.durChapterTime = src.durChapterTime
+            end
+        end
+        return book
+    end
 end
 
 -- 关闭 Shelf 打开过的所有菜单, 防止叠层导致 X 要点多次
@@ -87,15 +154,22 @@ function Shelf:openChapterDialog(book)
         -- 喂给 index 映射表: 目录位置 -> Legado 章节 index
         Api.seedChapterList(book.bookUrl, chapters)
 
-        local p = Progress.get(book)
+        local resume = resolveResume(book)
+        -- 越界保护: App 进度可能指向本地目录里不存在的章节(目录未同步/更新不一致),
+        -- 此时不显示续读项, 避免点进去加载不存在的章节。用户仍可从下面正常选章节。
+        if resume and (resume.ch < 1 or resume.ch > #chapters) then
+            logger.warn("comic resume out of range:", book.name, "ch", resume.ch, "/", #chapters)
+            resume = nil
+        end
         local items = {}
 
-        if p and p.ch then
+        if resume then
             table.insert(items, {
-                text = string.format("▶ 继续阅读: 第%d话 %s", p.ch, p.title or ""),
+                text = string.format("▶ 继续阅读: 第%d话 %s [%s]", resume.ch,
+                    resume.title or "", resume.from_app and "APP" or "本机"),
                 callback = function()
                     UIManager:close(self._chapter_menu)
-                    self:openReader(book, p.ch or 1, p.img or 1)
+                    self:openReader(book, resume.ch, resume.img, #chapters)
                 end,
             })
         end
@@ -108,7 +182,7 @@ function Shelf:openChapterDialog(book)
                 text = string.format("%d. %s", idx, title),
                 callback = function()
                     UIManager:close(self._chapter_menu)
-                    self:openReader(book, idx, 1)
+                    self:openReader(book, idx, 1, #chapters)  -- 传总章数, 最后一章边界提示才生效
                 end,
             })
         end
@@ -183,6 +257,8 @@ function Shelf:openFavList(books)
     end
 
     local favs = valid_books(Favs.list())
+    local enrich = enrich_from_shelf(books)
+    for _, f in ipairs(favs) do enrich(f) end
     local items = {
         {
             text = "✎  收藏管理 (点击书名切换收藏)",
@@ -197,9 +273,9 @@ function Shelf:openFavList(books)
         for _, f in ipairs(favs) do
             local label = "⭐ " .. f.name
             if f.author ~= "" then label = label .. "  ·  " .. f.author end
-            local p = Progress.get(f)
-            if p and p.ch then
-                label = label .. "  [第" .. tostring(p.ch) .. "话]"
+            local r = resolveResume(f)
+            if r then
+                label = label .. "  [读到第" .. tostring(r.ch) .. "话]"
             end
             table.insert(items, {
                 text = label,
@@ -250,9 +326,9 @@ function Shelf:openShelfList(books)
         for _, book in ipairs(all) do
             local label = book.name
             if book.author ~= "" then label = label .. "  ·  " .. book.author end
-            local p = Progress.get(book)
-            if p and p.ch then
-                label = label .. "  [读到第" .. tostring(p.ch) .. "话]"
+            local r = resolveResume(book)
+            if r then
+                label = label .. "  [读到第" .. tostring(r.ch) .. "话]"
             end
             if Favs.has(book) then label = "⭐ " .. label end
             table.insert(items, {
