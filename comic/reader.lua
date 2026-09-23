@@ -189,7 +189,11 @@ function M:onSwipe(_, ges)
     local direction = ges.direction
     local w = Screen:getWidth()
     -- 中部区域下滑关闭
+    -- (与原生 ImageViewer 对齐: scale_factor == 0 即"铺满屏幕"未缩放时才关闭;
+    --  已缩放时不关闭, 交给下面父类做平移, 免得误退)
+    -- 注: 这里以前只 return true 吞掉手势、并没有真的关闭, 所以"中部下滑退出"一直是无效的
     if direction == "south" and ges.pos.x >= w / 8 and ges.pos.x <= w * 7 / 8 and (self.scale_factor or 0) == 0 then
+        self:onClose()
         return true
     end
     if type(ImageViewer.onSwipe) == "function" then
