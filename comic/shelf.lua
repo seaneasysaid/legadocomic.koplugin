@@ -275,11 +275,37 @@ function Shelf:openFavManager(books)
         if degraded then
             table.insert(items, { text = "(书架里没有可显示的书, 以下仅列出已收藏的)", enabled = false })
         end
+        -- 「已删书籍」区块前置: 紧跟返回按钮, 条目再多也在第一页, 不会跑到第二页取消不掉
+        local gone_books, shelf_books = {}, {}
         for _, book in ipairs(all) do
+            if book.gone then gone_books[#gone_books + 1] = book else shelf_books[#shelf_books + 1] = book end
+        end
+        if #gone_books > 0 then
+            table.insert(items, { text = "── 已删书籍 (书架已无) ──", enabled = false })
+            for _, book in ipairs(gone_books) do
+                local is_fav = Favs.has(book)
+                local label = (is_fav and "⭐ " or "☆ ") .. book.name
+                if book.author ~= "" then label = label .. "  ·  " .. book.author end
+                label = label .. "  (书架已无)"
+                table.insert(items, {
+                    text = label,
+                    callback = function()
+                        Shelf:toggleFavorite(book)
+                        if self._fav_menu then
+                            UIManager:close(self._fav_menu)
+                        end
+                        render()
+                    end,
+                })
+            end
+            if #shelf_books > 0 then
+                table.insert(items, { text = "── 书架书籍 ──", enabled = false })
+            end
+        end
+        for _, book in ipairs(shelf_books) do
             local is_fav = Favs.has(book)
             local label = (is_fav and "⭐ " or "☆ ") .. book.name
             if book.author ~= "" then label = label .. "  ·  " .. book.author end
-            if book.gone then label = label .. "  (书架已无)" end
             table.insert(items, {
                 text = label,
                 callback = function()
