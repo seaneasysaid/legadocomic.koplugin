@@ -153,6 +153,14 @@ local function enrich_from_shelf(books)
     end
 end
 
+-- 收藏管理里的书目标签: ⭐(已收藏)/☆(未收藏) + 书名 · 作者 + 可选后缀
+local function fav_label(book, suffix)
+    local label = (Favs.has(book) and "⭐ " or "☆ ") .. book.name
+    if book.author ~= "" then label = label .. "  ·  " .. book.author end
+    if suffix then label = label .. suffix end
+    return label
+end
+
 -- 关闭 Shelf 打开过的所有菜单, 防止叠层导致 X 要点多次
 function Shelf:closeAllMenus()
     for _, k in ipairs({
@@ -163,7 +171,6 @@ function Shelf:closeAllMenus()
         "_settings_menu",  -- 设置
         "_fav_menu",       -- 收藏管理
     }) do
-
         local m = self[k]
         if m then
             pcall(function() UIManager:close(m) end)
@@ -283,12 +290,8 @@ function Shelf:openFavManager(books)
         if #gone_books > 0 then
             table.insert(items, { text = "── 已删书籍 (书架已无) ──", enabled = false })
             for _, book in ipairs(gone_books) do
-                local is_fav = Favs.has(book)
-                local label = (is_fav and "⭐ " or "☆ ") .. book.name
-                if book.author ~= "" then label = label .. "  ·  " .. book.author end
-                label = label .. "  (书架已无)"
                 table.insert(items, {
-                    text = label,
+                    text = fav_label(book, "  (书架已无)"),
                     callback = function()
                         Shelf:toggleFavorite(book)
                         if self._fav_menu then
@@ -303,11 +306,8 @@ function Shelf:openFavManager(books)
             end
         end
         for _, book in ipairs(shelf_books) do
-            local is_fav = Favs.has(book)
-            local label = (is_fav and "⭐ " or "☆ ") .. book.name
-            if book.author ~= "" then label = label .. "  ·  " .. book.author end
             table.insert(items, {
-                text = label,
+                text = fav_label(book),
                 callback = function()
                     Shelf:toggleFavorite(book)
                     -- 就地刷新列表
@@ -509,7 +509,6 @@ function Shelf:show()
     }
 
     self._shelf_menu = showMenu("Legado 漫画书架", items)
-    self._shelf_books = books
 end
 
 -- 手动刷新书架 (从「☰ 书架」菜单进入, 刷完留在这一层)
@@ -522,7 +521,6 @@ function Shelf:refreshShelf()
     end, function(ok, books, err)
         if ok and type(books) == "table" then
             settings.set("shelf_cache", { books = books, ts = os.time() })
-            Shelf._books = books
             Shelf:openShelfList(books)
         else
             -- 刷新失败也别把人踢出书架层, 用缓存继续展示

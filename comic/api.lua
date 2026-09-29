@@ -34,9 +34,10 @@ end
 
 function M.buildUrl(path, params)
     local base = tostring(settings.get("server") or ""):gsub("/+$", "")
+    params = params or {} -- 不传 params 时也要带上鉴权 key(否则写进临时表被丢掉)
     local query = {}
-    addKey(params or {})
-    for k, v in pairs(params or {}) do
+    addKey(params)
+    for k, v in pairs(params) do
         query[#query + 1] = k .. "=" .. util.urlEncode(tostring(v))
     end
     local q = #query > 0 and ("?" .. table.concat(query, "&")) or ""

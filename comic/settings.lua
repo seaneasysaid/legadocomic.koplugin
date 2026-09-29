@@ -20,7 +20,6 @@ function M.open(path)
     if _instance and not path then return _instance end
     local p = path
     if not p then
-        local DataStorage = require("datastorage")
         p = DataStorage:getDataDir() .. "/settings/legadocomic.lua"
     end
     local s = LuaSettings:open(p)

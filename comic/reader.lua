@@ -38,6 +38,9 @@ local function placeholder_bb()
     return PLACEHOLDER
 end
 
+-- 返回 (图片url列表, 章节标题) 或 (nil, 错误原因)
+-- 注意: 这里**不要**写 self.chapter_title —— 预取下一章时会顺手把"当前章标题"冲成下一章的,
+-- 导致本地进度和同步到 App 的章节标题整体错一章。标题交给调用方决定怎么用。
 function M:fetchImgList(ch_index)
     -- 目录位置 -> Legado 的章节 index (从 0 开始), 否则会整体错位一章
     local api_index = Api.toApiIndex(self.book.bookUrl, ch_index)
@@ -46,16 +49,16 @@ function M:fetchImgList(ch_index)
         return nil, err or "获取章节内容失败"
     end
     -- data 可能是字符串(html) 或 table
-    local content = data
+    local content, title = data, nil
     if type(data) == "table" then
         content = data.data or data.content or ""
-        self.chapter_title = data.title or self.chapter_title
+        title = data.title
     end
     local urls = Api.extractImageUrls(content)
     if #urls == 0 then
         return nil, "章节内没有图片 (可能不是漫画, 或换源后内容为空)"
     end
-    return urls
+    return urls, title
 end
 
 function M:loadImage(ch_index, img_index, imglist)
@@ -113,6 +116,7 @@ end
 
 -- 初始化并打开: options = {book, start_ch, start_img, on_close_callback}
 -- 兼容点号/冒号两种调用方式
+-- 注: 加载是异步的(UI.loading 内部 scheduleIn 0.1s), 这里无法返回 viewer
 function M.fetchAndShow(a, b)
     local options = (a == M) and b or a
     if type(options) ~= "table" or type(options.book) ~= "table" then
@@ -131,7 +135,6 @@ function M.fetchAndShow(a, b)
         v.cur_ch = start_ch
         v.imglist = list
         v.cur_img = options.start_img or 1
-        v._session_start = os.time() -- 本次打开漫画的时间(隔章清理用)
         if v.cur_img > #list then v.cur_img = #list end
         local bb = M.loadImage(v, start_ch, v.cur_img, list) or placeholder_bb()
         -- 多图模式构造, 启用 ImageViewer 内建翻页手势 -> onShowNextImage/onShowPrevImage
@@ -143,7 +146,7 @@ function M.fetchAndShow(a, b)
             total_ch = options.total_ch,
             chapter_title = v.chapter_title,
             on_close_callback = options.on_close_callback,
-            _session_start = os.time(),
+            _session_start = os.time(), -- 本次打开漫画的时间(隔章清理用)
             image = bb,
             fullscreen = true,
             with_title_bar = false,
@@ -159,7 +162,6 @@ function M.fetchAndShow(a, b)
             UI.error(err or "打开失败")
         end
     end)
-    return viewer
 end
 
 function M:onClose()
@@ -395,11 +397,12 @@ function M:gotoPage(ch_index, img_index, direction)
     -- 列表未预取到: 后台拉取, 显示"换章中"
     UI.loading("加载章节", function()
         return self:fetchImgList(ch_index)
-    end, function(ok, list, err)
+    end, function(ok, list, title_or_err)
+        -- 第二个返回值: 成功时是章节标题, 失败时是错误原因
         if ok and list then
-            self:_applyPage(ch_index, img_index, list, self.chapter_title, direction)
+            self:_applyPage(ch_index, img_index, list, title_or_err, direction)
         else
-            UI.error(err or "章节图片列表获取失败")
+            UI.error(title_or_err or "章节图片列表获取失败")
         end
     end)
 end
@@ -493,22 +496,6 @@ function M:_applyPage(ch_index, img_index, list, title, direction)
     self:schedulePrefetch()
 end
 
--- 取任意章节图片列表(相邻章优先用预取)
-function M:_chapterList(ch_index)
-    if ch_index == self.next_list_ch and self.next_list then
-        local l = self.next_list
-        self.next_list = nil
-        self.next_list_ch = nil
-        return l
-    end
-    local list, err = self:fetchImgList(ch_index)
-    if not list then
-        logger.warn("fetch img list failed:", ch_index, err)
-        return nil
-    end
-    return list
-end
-
 ---------- 预取 ----------
 function M:schedulePrefetch()
     if self._closed or self._prefetch_pending then return end
@@ -548,13 +535,13 @@ function M:prefetchStep(count)
 
     -- 确保"下一章列表"已就绪(提前取, 跨章翻页零等待); 与图片预取数无关
     if not self.next_list and not (self.total_ch and self.cur_ch >= self.total_ch) then
-        local list, err = self:fetchImgList(self.cur_ch + 1)
+        local list, title_or_err = self:fetchImgList(self.cur_ch + 1)
         if list then
             self.next_list = list
             self.next_list_ch = self.cur_ch + 1
-            self.next_title = self.chapter_title
+            self.next_title = title_or_err
         else
-            logger.dbg("prefetch next chapter failed:", err)
+            logger.dbg("prefetch next chapter failed:", title_or_err)
         end
     end
 

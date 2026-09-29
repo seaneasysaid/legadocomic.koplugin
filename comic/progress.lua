@@ -6,8 +6,11 @@ local logger = require("logger")
 local M = {}
 local path = DataStorage:getDataDir() .. "/settings/legadocomic_progress.lua"
 
+-- 只打开一次并复用: resolveResume 会对每本书调 get(), 每次重开等于每本书读一遍文件
+local _instance = nil
 local function open()
-    return LuaSettings:open(path)
+    if not _instance then _instance = LuaSettings:open(path) end
+    return _instance
 end
 
 local function bookKey(book)

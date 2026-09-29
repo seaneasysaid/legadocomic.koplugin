@@ -188,7 +188,6 @@ function M:_flushSpan(end_now)
     pcall(db.close, db)
     if ok then
         self._anchor = end_now
-        self._seen = {}
         self._seen_order = {}
     else
         logger.warn("legadocomic stats write failed:", tostring(result))
@@ -199,7 +198,6 @@ end
 -- book = {name, author, bookUrl}; 失败静默降级, 绝不影响阅读
 function M:start(book)
     logger.info("legadocomic stats: start called for", tostring(book and book.name))
-    if self._closed then self._closed = nil end
     local now = os.time()
     local id, err = self:_getOrCreateBook(book, M.identityForBook(book), now)
     if not id then
@@ -211,7 +209,6 @@ function M:start(book)
     self.current_page = 1
     self._anchor = now
     self._pending = 0
-    self._seen = {}
     self._seen_order = {}
     logger.info("legadocomic stats: start ok, book_id=", id)
     return true
@@ -223,7 +220,6 @@ function M:onPageChanged(page)
     if not self.book_id then return end
     local p = math.max(1, tonumber(page) or self.current_page or 1)
     if p ~= self.current_page then
-        self._seen = self._seen or {}
         self._seen_order = self._seen_order or {}
         self._seen_order[#self._seen_order + 1] = p
         self.current_page = p
@@ -249,7 +245,6 @@ function M:close()
     pcall(self._flushSpan, self, os.time())
     self.book_id = nil
     self._pending = 0
-    self._closed = true
 end
 
 return M

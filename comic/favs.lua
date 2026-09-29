@@ -5,8 +5,11 @@ local DataStorage = require("datastorage")
 local M = {}
 local path = DataStorage:getDataDir() .. "/settings/legadocomic_favs.lua"
 
+-- 只打开一次并复用: 书架/收藏管理会逐本调 has(), 每次重开等于每本书读一遍文件
+local _instance = nil
 local function open()
-    return LuaSettings:open(path)
+    if not _instance then _instance = LuaSettings:open(path) end
+    return _instance
 end
 
 function M.key(book)
