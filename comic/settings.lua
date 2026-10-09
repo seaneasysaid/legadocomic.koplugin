@@ -10,6 +10,7 @@ local DEFAULTS = {
     user = "",
     pwd = "",
     prefetch = 5,       -- 预取张数
+    prefetch_whole_chapter = false, -- 整章预下载: 进入某章后后台把本章图片全部下完
     proxy_image = true, -- 走 legado app /image 代理(按屏宽缩放, 省流量)
     sync_progress = true, -- 关闭阅读器时同步进度到 app
     auto_clear_chapter = true, -- 换章后自动删除前两章之前的缓存

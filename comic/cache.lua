@@ -64,11 +64,18 @@ end
 function M.put(key, data)
     ensure_dir()
     local tmp = M.path(key) .. ".tmp"
-    if not util.writeToFile(data, tmp, true) then return false end
+    -- 第 3 参是 force_flush(fsync), 不是"检查空间"。缓存图本身是可再生的,
+    -- 且下面还有 .tmp + rename 兜底, 每张都 fsync 只是白等 I/O(整章预下载时尤其明显)。
+    if not util.writeToFile(data, tmp, false) then return false end
     os.remove(M.path(key))
     local ok = os.rename(tmp, M.path(key))
-    if not ok then logger.warn("cache rename failed:", key) end
-    if ok then maybePrune() end
+    if ok then
+        maybePrune()
+    else
+        -- rename 失败必须自己清掉 .tmp: prune/clear 只匹配 .img, 否则这堆残留永远扫不到
+        logger.warn("cache rename failed:", key)
+        os.remove(tmp)
+    end
     return ok
 end
 
@@ -90,7 +97,8 @@ function M.prune(limit_bytes)
     local files = {}
     local total = 0
     for entry in lfs.dir(cache_dir) do
-        if entry:match("%.img$") then
+        -- 一并把残留的 .tmp(rename 失败的垃圾)算进来, 超限时顺手清掉
+        if entry:match("%.img$") or entry:match("%.img%.tmp$") then
             local p = cache_dir .. "/" .. entry
             local attr = lfs.attributes(p)
             if attr and attr.mode == "file" then
@@ -153,7 +161,7 @@ end
 function M.clear()
     ensure_dir()
     for entry in lfs.dir(cache_dir) do
-        if entry:match("%.img$") then
+        if entry:match("%.img$") or entry:match("%.img%.tmp$") then
             os.remove(cache_dir .. "/" .. entry)
         end
     end

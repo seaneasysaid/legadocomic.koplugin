@@ -185,11 +185,16 @@ function Shelf:openChapterDialog(book)
         pcall(function() UIManager:close(self._chapter_menu) end)
         self._chapter_menu = nil
     end
-    if NetworkMgr:willRerunWhenConnected() then return end
+    -- 必须把"要继续做的事"作为回调传进去: willRerunWhenConnected(callback) 在断网时会去
+    -- 开 Wi-Fi 并**重跑 callback**; 不传回调 = 用户的点击被默默丢掉(弹出"是否打开 Wi-Fi" ->
+    -- 连上后什么都没发生, 得再点一次)。
+    if NetworkMgr:willRerunWhenConnected(function() Shelf:openChapterDialog(book) end) then return end
     UI.loading("获取章节列表", function()
         local chapters, err = Api.getChapterList(book.bookUrl)
         if not chapters or type(chapters) ~= "table" then
-            return nil, nil, err or "获取章节列表失败"
+            -- 只返回 2 个值: UI.loading 只转发前两个返回值(err 放第 3 位会被丢掉,
+            -- 用户在提示里就只能看到兜底文案, 看不到真实原因)
+            return nil, err or "获取章节列表失败"
         end
         return chapters
     end, function(ok, chapters, err)
@@ -214,20 +219,27 @@ function Shelf:openChapterDialog(book)
                 text = string.format("▶ 继续阅读: 第%d话 %s [%s]", resume.ch,
                     resume.title or "", resume.from_app and "APP" or "本机"),
                 callback = function()
+                    -- 关掉后必须把引用置空: 否则退出阅读器回到这里时, openChapterDialog 开头那句
+                    -- "关掉旧菜单"会对一个**已经关掉**的控件再 close 一次 —— UIManager:close 是不管
+                    -- 控件还在不在栈上的, 会再发一遍 CloseWidget/FlushSettings。
                     UIManager:close(self._chapter_menu)
+                    self._chapter_menu = nil
                     self:openReader(book, resume.ch, resume.img, #chapters)
                 end,
             })
         end
 
         for i, ch in ipairs(chapters) do
-            local title = tostring(ch.title or ("第 " .. i .. " 话"))
-            if #title > 40 then title = title:sub(1, 40) .. "…" end
+            -- 按「字符数」截断(UTF-8 安全): 原来的 title:sub(1,40) 是按字节切,
+            -- 中文一个字 3 字节 -> 第 40 字节常常落在字的中间, 菜单里出现半个字/乱码
+            local title = UI.ellipsize(ch.title or ("第 " .. i .. " 话"), 40)
             local idx = i
             table.insert(items, {
                 text = string.format("%d. %s", idx, title),
                 callback = function()
+                    -- 同「继续阅读」项: 关掉后置空引用, 避免退出阅读器时二次 close
                     UIManager:close(self._chapter_menu)
+                    self._chapter_menu = nil
                     self:openReader(book, idx, 1, #chapters)  -- 传总章数, 最后一章边界提示才生效
                 end,
             })
@@ -453,7 +465,8 @@ function Shelf:openShelfList(books)
 end
 
 function Shelf:openReader(book, ch, img, total_ch)
-    if NetworkMgr:willRerunWhenConnected() then return end
+    -- 同 openChapterDialog: 传回调, 断网时连上 Wi-Fi 后自动继续打开
+    if NetworkMgr:willRerunWhenConnected(function() Shelf:openReader(book, ch, img, total_ch) end) then return end
     require("comic/reader").fetchAndShow({
         book = book,
         start_ch = ch or 1,
@@ -467,17 +480,17 @@ function Shelf:openReader(book, ch, img, total_ch)
 end
 
 -- 切换收藏状态(供收藏管理调用)
-function Shelf:toggleFavorite(book, on_done)
+function Shelf:toggleFavorite(book)
     local is_fav = Favs.toggle(book)
     UI.info(is_fav and ("⭐ 已加入收藏: " .. book.name) or ("已取消收藏: " .. book.name), 2)
-    if type(on_done) == "function" then on_done() end
 end
 
--- 顶层: 只有 ⭐收藏 / ☰书架 / ⚙设置 三个固定入口.
+-- 顶层: ⭐收藏 / ☰书架 / ⚙设置 三个固定入口 (+ 有本机进度时置顶的「继续阅读」直达).
 -- 书全部收进「☰ 书架」子菜单、收藏收进「⭐ 收藏」子菜单,
 -- 所以书架上有 3 本还是 300 本, 这一层的样子都不变.
 function Shelf:show()
-    if NetworkMgr:willRerunWhenConnected() then return end
+    -- 传回调: 断网时先开 Wi-Fi, 连上后自动把书架弹出来(不传回调则这次点击丢失)
+    if NetworkMgr:willRerunWhenConnected(function() Shelf:show() end) then return end
     self:closeAllMenus()
 
     -- 顶层不列书, 只读上次缓存的书架算个数; 仍然不自动联网
@@ -485,34 +498,56 @@ function Shelf:show()
     local books = (type(cached) == "table") and cached.books or nil
     local shown, hidden = apply_comic_filter(books)
 
-    local items = {
-        {
-            text = string.format("⭐  收藏 (%d 本)", #valid_books(Favs.list())),
+    local items = {}
+
+    -- 「继续阅读」直达: 有本机进度时置顶, 一键回到上次那张, 省去 进书架→选书→选章 三步
+    local latest = Progress.latest()
+    if type(latest) == "table" and type(latest.bookUrl) == "string" then
+        local label = "▶  继续阅读: " .. tostring(latest.name or latest.bookUrl)
+        if latest.ch then label = label .. "   [第" .. tostring(latest.ch) .. "话]" end
+        local cont_book = {
+            name = latest.name, author = latest.author or "",
+            bookUrl = latest.bookUrl, origin = latest.origin,
+        }
+        table.insert(items, {
+            text = label,
             callback = function()
-                Shelf:openFavList(books)
+                -- 第 4 参传总章数(进度记录里存过): 末章边界提示与预取末章保护才生效
+                Shelf:openReader(cont_book, tonumber(latest.ch) or 1, tonumber(latest.img) or 1,
+                    tonumber(latest.total))
             end,
-        },
-        {
-            text = (hidden > 0)
-                and string.format("☰  漫画书架 (%d 本 · 隐藏 %d)", #shown, hidden)
-                or string.format("☰  书架 (%d 本)", #shown),
-            callback = function()
-                Shelf:openShelfList(books)
-            end,
-        },
-        {
-            text = "⚙  设置 (服务器/预取/缓存)",
-            callback = function()
-                Shelf:openSettings()
-            end,
-        },
-    }
+        })
+    end
+
+    table.insert(items, {
+        text = string.format("⭐  收藏 (%d 本)", #valid_books(Favs.list())),
+        callback = function()
+            Shelf:openFavList(books)
+        end,
+    })
+    table.insert(items, {
+        text = (hidden > 0)
+            and string.format("☰  漫画书架 (%d 本 · 隐藏 %d)", #shown, hidden)
+            or string.format("☰  书架 (%d 本)", #shown),
+        callback = function()
+            Shelf:openShelfList(books)
+        end,
+    })
+    table.insert(items, {
+        text = "⚙  设置 (服务器/预取/缓存)",
+        callback = function()
+            Shelf:openSettings()
+        end,
+    })
 
     self._shelf_menu = showMenu("Legado 漫画书架", items)
 end
 
 -- 手动刷新书架 (从「☰ 书架」菜单进入, 刷完留在这一层)
 function Shelf:refreshShelf()
+    -- 刷新是纯网络操作: 断网时先开 Wi-Fi, 连上后自动重跑
+    -- (没有回调的话, 用户在断网时点"刷新书架"只会看到一句"获取书架失败")
+    if NetworkMgr:willRerunWhenConnected(function() Shelf:refreshShelf() end) then return end
     Shelf:closeAllMenus()
     UI.loading("获取书架", function()
         local books, err = Api.getBookshelf()
@@ -553,8 +588,8 @@ function Shelf:openSettings()
                 UI.input("服务器地址", settings.get("server"), "http://192.168.1.8:1122", function(v)
                     if v and v ~= "" then
                         settings.set("server", v)
-                        UI.info("已保存", 1)
                         reopen()
+                        UI.info("已保存", 1)
                     end
                 end)
             end,
@@ -564,8 +599,8 @@ function Shelf:openSettings()
             callback = function()
                 UI.input("用户名", settings.get("user"), "可留空", function(v)
                     settings.set("user", v or "")
-                    UI.info("已保存", 1)
                     reopen()
+                    UI.info("已保存", 1)
                 end)
             end,
         },
@@ -574,8 +609,8 @@ function Shelf:openSettings()
             callback = function()
                 UI.input("密码", settings.get("pwd"), "可留空", function(v)
                     settings.set("pwd", v or "")
-                    UI.info("已保存", 1)
                     reopen()
+                    UI.info("已保存", 1)
                 end, true)
             end,
         },
@@ -587,10 +622,18 @@ function Shelf:openSettings()
                     if n then
                         n = math.max(0, math.min(20, math.floor(n)))
                         settings.set("prefetch", n)
-                        UI.info("已保存", 1)
                         reopen()
+                        UI.info("已保存", 1)
                     end
                 end)
+            end,
+        },
+        {
+            text = "整章预下载(进章后后台下完本章): " .. ((settings.get("prefetch_whole_chapter") == true) and "开" or "关"),
+            callback = function()
+                settings.set("prefetch_whole_chapter", settings.get("prefetch_whole_chapter") ~= true)
+                reopen()
+                UI.info("已保存", 1)
             end,
         },
         {
@@ -601,8 +644,8 @@ function Shelf:openSettings()
                     if n then
                         n = math.max(50, math.min(2000, math.floor(n)))
                         settings.set("cache_limit", n)
-                        UI.info("已保存", 1)
                         reopen()
+                        UI.info("已保存", 1)
                     end
                 end)
             end,
@@ -611,24 +654,24 @@ function Shelf:openSettings()
             text = "自动删除旧章节缓存(隔两章): " .. ((settings.get("auto_clear_chapter") ~= false) and "开" or "关"),
             callback = function()
                 settings.set("auto_clear_chapter", settings.get("auto_clear_chapter") == false)
-                UI.info("已保存", 1)
                 reopen()
+                UI.info("已保存", 1)
             end,
         },
         {
             text = "图片代理缩放: " .. ((settings.get("proxy_image") ~= false) and "开" or "关"),
             callback = function()
                 settings.set("proxy_image", settings.get("proxy_image") == false)
-                UI.info("已保存", 1)
                 reopen()
+                UI.info("已保存", 1)
             end,
         },
         {
             text = "退出时同步进度到APP: " .. ((settings.get("sync_progress") ~= false) and "开" or "关"),
             callback = function()
                 settings.set("sync_progress", settings.get("sync_progress") == false)
-                UI.info("已保存", 1)
                 reopen()
+                UI.info("已保存", 1)
             end,
         },
     }
@@ -641,6 +684,9 @@ function Shelf:openSettings()
             UI.confirm("确定清空所有已缓存图片?", function(ok)
                 if ok then
                     require("comic/cache").clear()
+                    -- 先重建菜单(重算 usage), 再弹提示: 反过来的话提示会被全屏菜单盖住;
+                    -- 不重建的话菜单上那行"清空图片缓存 (12.3MB / 40张)"会一直停在旧数字。
+                    reopen()
                     UI.info("缓存已清空")
                 end
             end)
