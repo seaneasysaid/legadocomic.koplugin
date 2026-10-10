@@ -161,22 +161,18 @@ local function fav_label(book, suffix)
     return label
 end
 
--- 关闭 Shelf 打开过的所有菜单, 防止叠层导致 X 要点多次
+-- 关闭 Shelf 打开过的所有菜单, 防止叠层导致 X 要点多次。
+-- 注: 菜单栏入口 (原生 sub_item_table_func) 不需要这里管, KOReader 自己会收;
+-- 这里只管自绘窗口: _cust_menu(自绘页) / _chapter_menu(章节) / _fav_menu(收藏管理)。
 function Shelf:closeAllMenus()
-    for _, k in ipairs({
-        "_shelf_menu",     -- 顶层
-        "_list_menu",      -- ☰ 书架
-        "_favlist_menu",   -- ⭐ 收藏
-        "_chapter_menu",   -- 章节列表
-        "_settings_menu",  -- 设置
-        "_fav_menu",       -- 收藏管理
-    }) do
+    for _, k in ipairs({ "_cust_menu", "_chapter_menu", "_fav_menu" }) do
         local m = self[k]
         if m then
             pcall(function() UIManager:close(m) end)
             self[k] = nil
         end
     end
+    self._cust_reopen = nil
 end
 
 function Shelf:openChapterDialog(book)
@@ -283,11 +279,11 @@ function Shelf:openFavManager(books)
             {
                 text = "←  返回收藏",
                 callback = function()
+                    -- 只关自己: 下面的「⭐ 收藏夹」页(原生页或自绘页)还开着, 关掉就看见了
                     if self._fav_menu then
                         UIManager:close(self._fav_menu)
                         self._fav_menu = nil
                     end
-                    Shelf:openFavList(books)
                 end,
             },
         }
@@ -335,96 +331,126 @@ function Shelf:openFavManager(books)
     render()
 end
 
--- 「⭐ 收藏」菜单: 管理入口 + 我的收藏
-function Shelf:openFavList(books)
-    -- 分级导航: 保留顶层在下层
-    if self._favlist_menu then
-        pcall(function() UIManager:close(self._favlist_menu) end)
-        self._favlist_menu = nil
-    end
+-- ================= 菜单内容 (KOReader 原生菜单项) =================
+-- 一级「Legado 漫画」由 main.lua 注册 (sub_item_table_func), 点开就是 mainMenuItems();
+-- 「☰ 漫画书架」「⭐ 收藏夹」不挂 sub_item_table_func (不做成原生三级菜单): 点一下直接开
+-- 自绘窗口, 和遥控器/手势入口同一个观感; 只有「⚙ 设置」继续往下走原生子菜单。
+-- 遥控器/手势入口 (Shelf:show) 走文件末尾的自绘适配, 内容用的是同一批 builder。
 
-    local favs = valid_books(Favs.list())
-    local enrich = enrich_from_shelf(books)
-    for _, f in ipairs(favs) do enrich(f) end
-    local items = {
-        {
-            text = "←  返回",
-            callback = function()
-                if self._favlist_menu then
-                    UIManager:close(self._favlist_menu)
-                    self._favlist_menu = nil
-                end
-                Shelf:show()
-            end,
-        },
-        {
-            text = "✎  收藏管理 (点击书名切换收藏)",
-            callback = function()
-                Shelf:openFavManager(books)
-            end,
-        },
-    }
-
-    if #favs > 0 then
-        table.insert(items, { text = "── ⭐ 我的收藏 ──", enabled = false })
-        for _, f in ipairs(favs) do
-            local label = "⭐ " .. f.name
-            if f.author ~= "" then label = label .. "  ·  " .. f.author end
-            local r = resolveResume(f)
-            if r then
-                label = label .. "  [读到第" .. tostring(r.ch) .. "话]"
-            end
-            table.insert(items, {
-                text = label,
-                callback = function()
-                    Shelf:openChapterDialog(f)
-                end,
-            })
-        end
-    else
-        table.insert(items, { text = "(还没有收藏, 点上方「✎ 收藏管理」添加)", enabled = false })
-    end
-
-    self._favlist_menu = showMenu(string.format("⭐ 收藏 (%d 本)", #favs), items)
+-- 上次刷新缓存下来的书架(list); 各页共用, 只读本地不联网
+local function cached_shelf_books()
+    local cached = settings.open():readSetting("shelf_cache")
+    return (type(cached) == "table") and cached.books or nil
 end
 
--- 「☰ 书架」菜单: 刷新入口 + 全部书籍
--- 已收藏的书加 ⭐ 前缀提示, 但仍在这里可点 (收藏是独立视图, 不再把书从书架里抽走)
-function Shelf:openShelfList(books)
-    -- 分级导航: 保留顶层在下层
-    if self._list_menu then
-        pcall(function() UIManager:close(self._list_menu) end)
-        self._list_menu = nil
+-- 自绘页适配器定义在文件下方, 这里先声明 —— mainMenuItems 里的回调要用到它
+local open_custom_page
+
+-- 二级页: 「▶ 继续阅读」(有本机进度时) + ☰漫画书架 / ⭐收藏夹 / ⚙设置
+function Shelf:mainMenuItems()
+    local items = {}
+
+    -- 「继续阅读」直达: 有本机进度时置顶, 一键回到上次那张, 省去 进书架→选书→选章 三步
+    local latest = Progress.latest()
+    if type(latest) == "table" and type(latest.bookUrl) == "string" then
+        local label = "▶  继续阅读: " .. tostring(latest.name or latest.bookUrl)
+        if latest.ch then label = label .. "   [第" .. tostring(latest.ch) .. "话]" end
+        local cont_book = {
+            name = latest.name, author = latest.author or "",
+            bookUrl = latest.bookUrl, origin = latest.origin,
+        }
+        table.insert(items, {
+            text = label,
+            callback = function()
+                -- 第 4 参传总章数(进度记录里存过): 末章边界提示与预取末章保护才生效
+                Shelf:openReader(cont_book, tonumber(latest.ch) or 1,
+                    tonumber(latest.img) or 1, tonumber(latest.total))
+            end,
+        })
     end
 
+    -- text_func: 每次重画本页都重新算本数(不联网)
+    table.insert(items, {
+        text_func = function()
+            local shown, hidden = apply_comic_filter(cached_shelf_books())
+            if hidden > 0 then
+                return string.format("☰  漫画书架 (%d 本 · 隐藏 %d)", #shown, hidden)
+            end
+            return string.format("☰  漫画书架 (%d 本)", #shown)
+        end,
+        -- 直接开自绘窗口: keep_menu_open 让原生二级菜单留在下层, 关掉窗口就回到这里;
+        -- custom_page 是给自绘路径(遥控器/手势)看的 —— 那边翻成"开新页 + ← 返回"
+        keep_menu_open = true,
+        callback = function()
+            Shelf:openShelfWindow()
+        end,
+        custom_page = function(parent)
+            Shelf:openShelfWindow(parent)
+        end,
+    })
+    table.insert(items, {
+        text_func = function()
+            return string.format("⭐  收藏夹 (%d 本)", #valid_books(Favs.list()))
+        end,
+        keep_menu_open = true,
+        callback = function()
+            Shelf:openFavWindow()
+        end,
+        custom_page = function(parent)
+            Shelf:openFavWindow(parent)
+        end,
+    })
+    -- 只有「设置」继续走原生子菜单(三级), 里面有四级子菜单
+    table.insert(items, {
+        text = "⚙  设置",
+        sub_item_table_func = function()
+            return Shelf:settingsItems()
+        end,
+    })
+    return items
+end
+
+-- 「☰ 漫画书架」/「⭐ 收藏夹」: 开自绘窗口。
+-- parent: 遥控器/手势的自绘导航需要(会补「← 返回」); 从原生菜单进来不传 —— 原生菜单
+--         留在下层(项上带 keep_menu_open), 关掉窗口即回到二级菜单。
+function Shelf:openShelfWindow(parent)
+    open_custom_page("☰ 漫画书架",
+        function() return Shelf:shelfListItems(cached_shelf_books()) end, parent)
+end
+
+function Shelf:openFavWindow(parent)
+    open_custom_page("⭐ 收藏夹",
+        function() return Shelf:favListItems(cached_shelf_books()) end, parent)
+end
+
+-- 「☰ 漫画书架」页: 只看漫画开关 / 刷新书架 / 全部书(点开进章节列表)
+function Shelf:shelfListItems(books)
     local all, hidden = apply_comic_filter(books)
     local filter_on = settings.get("comic_only") ~= false
-    local items = {
-        {
-            text = "←  返回",
-            callback = function()
-                if self._list_menu then
-                    UIManager:close(self._list_menu)
-                    self._list_menu = nil
-                end
-                Shelf:show()
-            end,
-        },
-        {
-            -- 别用 emoji: KOReader 的字体里没有字形, 会显示成空白/豆腐块, 用几何符号
-            text = filter_on and "◉  只看漫画: 开" or "○  只看漫画: 关 (显示全部书)",
-            callback = function()
-                settings.set("comic_only", not filter_on)
-                Shelf:openShelfList(books)
-            end,
-        },
-        {
-            text = "⟳  刷新书架",
-            callback = function()
-                Shelf:refreshShelf()
-            end,
-        },
-    }
+    local items = {}
+
+    table.insert(items, {
+        -- 别用 emoji: KOReader 的字体里没有字形, 会显示成空白/豆腐块, 用几何符号
+        text = "只看漫画 (隐藏非漫画书)",
+        checked_func = function() return settings.get("comic_only") ~= false end,
+        -- 开关会改变下面整个列表, 所以要留在本页就地换掉 item_table;
+        -- 不设 keep_menu_open 的话 onMenuSelect 回调完就把菜单关了, 换页也就看不见了。
+        keep_menu_open = true,
+        callback = function(tm)
+            settings.set("comic_only", settings.get("comic_only") == false)
+            if tm then
+                tm.item_table = Shelf:shelfListItems(cached_shelf_books())
+                tm:updateItems()
+            end
+        end,
+    })
+    table.insert(items, {
+        text = "⟳  刷新书架",
+        keep_menu_open = true,
+        callback = function(tm)
+            Shelf:refreshShelf(tm)
+        end,
+    })
 
     if #all > 0 then
         table.insert(items, { text = filter_on and "── 漫画 ──" or "── 全部书籍 ──", enabled = false })
@@ -454,14 +480,58 @@ function Shelf:openShelfList(books)
     if hidden > 0 then
         table.insert(items, {
             text = string.format("»  已隐藏 %d 本非漫画 · 点此显示全部", hidden),
-            callback = function()
+            keep_menu_open = true,
+            callback = function(tm)
                 settings.set("comic_only", false)
-                Shelf:openShelfList(books)
+                if tm then
+                    tm.item_table = Shelf:shelfListItems(cached_shelf_books())
+                    tm:updateItems()
+                end
             end,
         })
     end
 
-    self._list_menu = showMenu(string.format(filter_on and "☰ 漫画书架 (%d 本)" or "☰ 书架 (%d 本)", #all), items)
+    return items
+end
+
+-- 「⭐ 收藏夹」页: 收藏管理入口 + 我的收藏(不过滤, 已收藏的书永远可达)
+function Shelf:favListItems(books)
+    local favs = valid_books(Favs.list())
+    local enrich = enrich_from_shelf(books)
+    for _, f in ipairs(favs) do enrich(f) end
+
+    local items = {
+        {
+            text = "✎  收藏管理 (点击书名切换收藏)",
+            -- 收藏管理是自绘的勾选列表(点一下要就地重画), 让本页留在下面, 关掉它就回来了
+            keep_menu_open = true,
+            callback = function()
+                Shelf:openFavManager(books)
+            end,
+        },
+    }
+
+    if #favs > 0 then
+        table.insert(items, { text = "── ⭐ 我的收藏 ──", enabled = false })
+        for _, f in ipairs(favs) do
+            local label = "⭐ " .. f.name
+            if f.author ~= "" then label = label .. "  ·  " .. f.author end
+            local r = resolveResume(f)
+            if r then
+                label = label .. "  [读到第" .. tostring(r.ch) .. "话]"
+            end
+            table.insert(items, {
+                text = label,
+                callback = function()
+                    Shelf:openChapterDialog(f)
+                end,
+            })
+        end
+    else
+        table.insert(items, { text = "(还没有收藏, 点上方「✎ 收藏管理」添加)", enabled = false })
+    end
+
+    return items
 end
 
 function Shelf:openReader(book, ch, img, total_ch)
@@ -485,71 +555,96 @@ function Shelf:toggleFavorite(book)
     UI.info(is_fav and ("⭐ 已加入收藏: " .. book.name) or ("已取消收藏: " .. book.name), 2)
 end
 
--- 二级入口 (点一级「Legado 漫画」进入): ☰漫画书架 / ⭐收藏夹 / ⚙设置 三个固定入口
--- (+ 有本机进度时置顶的「继续阅读」直达). 书全部收进「☰ 漫画书架」子菜单、
--- 收藏收进「⭐ 收藏夹」子菜单, 所以书架上有 3 本还是 300 本, 这一层的样子都不变.
-function Shelf:show()
-    -- 传回调: 断网时先开 Wi-Fi, 连上后自动把书架弹出来(不传回调则这次点击丢失)
-    if NetworkMgr:willRerunWhenConnected(function() Shelf:show() end) then return end
-    self:closeAllMenus()
+-- ================= 自绘菜单适配 (遥控器 / 手势入口) =================
+-- 菜单栏入口走 KOReader 原生菜单 (sub_item_table_func), 遥控器/手势入口没法调原生菜单,
+-- 就用自绘 Menu 把同一份 builder 画出来。原生项里的 sub_item_table_func 自绘控件不认识,
+-- 这里翻成"点开另一个自绘窗口"; 开关类项(item.checked_func)点完原地重画, 让 ◉/○ 跟着变。
 
-    -- 顶层不列书, 只读上次缓存的书架算个数; 仍然不自动联网
-    local cached = settings.open():readSetting("shelf_cache")
-    local books = (type(cached) == "table") and cached.books or nil
-    local shown, hidden = apply_comic_filter(books)
+local function close_custom_page()
+    if Shelf._cust_menu then
+        pcall(function() UIManager:close(Shelf._cust_menu) end)
+        Shelf._cust_menu = nil
+    end
+end
 
-    local items = {}
+local function custom_page_text(it)
+    local t = it.text_func and it.text_func() or (it.text or "")
+    -- 自绘 Menu 没有勾选框, 把状态画进文本里
+    if it.checked_func then
+        t = (it.checked_func() and "◉  " or "○  ") .. t
+    end
+    return t
+end
 
-    -- 「继续阅读」直达: 有本机进度时置顶, 一键回到上次那张, 省去 进书架→选书→选章 三步
-    local latest = Progress.latest()
-    if type(latest) == "table" and type(latest.bookUrl) == "string" then
-        local label = "▶  继续阅读: " .. tostring(latest.name or latest.bookUrl)
-        if latest.ch then label = label .. "   [第" .. tostring(latest.ch) .. "话]" end
-        local cont_book = {
-            name = latest.name, author = latest.author or "",
-            bookUrl = latest.bookUrl, origin = latest.origin,
-        }
-        table.insert(items, {
-            text = label,
+-- title: 本层标题; build: function() -> 原生项表; parent: { title=, build=, parent= } 或 nil
+open_custom_page = function(title, build, parent)
+    close_custom_page()
+    local items = build()
+    local entries = {}
+
+    for _, it in ipairs(items) do
+        local enabled = it.enabled
+        if it.enabled_func then enabled = it.enabled_func() end
+        local text = custom_page_text(it)
+
+        if enabled == false then
+            entries[#entries + 1] = { text = text, enabled = false }
+        elseif it.custom_page then
+            -- 显式声明"点开另一个自绘页"的项(如 漫画书架/收藏夹 / 服务器设置 的入口)
+            entries[#entries + 1] = {
+                text = text,
+                callback = function()
+                    it.custom_page({ title = title, build = build, parent = parent })
+                end,
+            }
+        elseif it.sub_item_table_func or it.sub_item_table then
+            local sub_build = it.sub_item_table_func
+                or (function() local sub = it.sub_item_table; return sub end)
+            entries[#entries + 1] = {
+                text = text,
+                callback = function()
+                    open_custom_page(text, sub_build,
+                        { title = title, build = build, parent = parent })
+                end,
+            }
+        else
+            entries[#entries + 1] = {
+                text = text,
+                callback = function()
+                    if it.callback then it.callback() end
+                    if it.checked_func and Shelf._cust_reopen then Shelf._cust_reopen() end
+                end,
+            }
+        end
+    end
+
+    if parent then
+        table.insert(entries, 1, {
+            text = "←  返回",
             callback = function()
-                -- 第 4 参传总章数(进度记录里存过): 末章边界提示与预取末章保护才生效
-                Shelf:openReader(cont_book, tonumber(latest.ch) or 1, tonumber(latest.img) or 1,
-                    tonumber(latest.total))
+                open_custom_page(parent.title, parent.build, parent.parent)
             end,
         })
     end
 
-    -- 顺序: ☰ 漫画书架 → ⭐ 收藏夹 → ⚙ 设置
-    table.insert(items, {
-        text = (hidden > 0)
-            and string.format("☰  漫画书架 (%d 本 · 隐藏 %d)", #shown, hidden)
-            or string.format("☰  漫画书架 (%d 本)", #shown),
-        callback = function()
-            Shelf:openShelfList(books)
-        end,
-    })
-    table.insert(items, {
-        text = string.format("⭐  收藏夹 (%d 本)", #valid_books(Favs.list())),
-        callback = function()
-            Shelf:openFavList(books)
-        end,
-    })
-    table.insert(items, {
-        text = "⚙  设置 (服务器/预取/缓存)",
-        callback = function()
-            Shelf:openSettings()
-        end,
-    })
-
-    self._shelf_menu = showMenu("Legado 漫画", items)
+    Shelf._cust_reopen = function() open_custom_page(title, build, parent) end
+    Shelf._cust_menu = showMenu(title, entries)
 end
 
--- 手动刷新书架 (从「☰ 书架」菜单进入, 刷完留在这一层)
-function Shelf:refreshShelf()
+-- 遥控器 / 手势入口: 一级「Legado 漫画」→ 二级 漫画书架 / 收藏夹 / 设置
+function Shelf:show()
+    -- 传回调: 断网时先开 Wi-Fi, 连上后自动把菜单弹出来(不传回调则这次点击丢失)
+    if NetworkMgr:willRerunWhenConnected(function() Shelf:show() end) then return end
+    self:closeAllMenus()
+    open_custom_page("Legado 漫画", function() return Shelf:mainMenuItems() end, nil)
+end
+
+-- 手动刷新书架 (从「☰ 漫画书架」页点进来, 刷完留在这一页)
+-- tm: 原生菜单实例(可选)。传了就地换掉整页, 不传(自绘路径)则重画当前自绘页。
+function Shelf:refreshShelf(tm)
     -- 刷新是纯网络操作: 断网时先开 Wi-Fi, 连上后自动重跑
     -- (没有回调的话, 用户在断网时点"刷新书架"只会看到一句"获取书架失败")
-    if NetworkMgr:willRerunWhenConnected(function() Shelf:refreshShelf() end) then return end
-    Shelf:closeAllMenus()
+    if NetworkMgr:willRerunWhenConnected(function() Shelf:refreshShelf(tm) end) then return end
     UI.loading("获取书架", function()
         local books, err = Api.getBookshelf()
         if not books then return nil, err end
@@ -557,39 +652,129 @@ function Shelf:refreshShelf()
     end, function(ok, books, err)
         if ok and type(books) == "table" then
             settings.set("shelf_cache", { books = books, ts = os.time() })
-            Shelf:openShelfList(books)
+            if tm then
+                tm.item_table = Shelf:shelfListItems(cached_shelf_books())
+                tm:updateItems()
+            elseif Shelf._cust_reopen then
+                Shelf._cust_reopen()
+            end
         else
             -- 刷新失败也别把人踢出书架层, 用缓存继续展示
-            local cached = settings.open():readSetting("shelf_cache")
-            Shelf:openShelfList((type(cached) == "table") and cached.books or nil)
             UI.error(err or "获取书架失败, 请检查设置")
+            if tm then
+                tm.item_table = Shelf:shelfListItems(cached_shelf_books())
+                tm:updateItems()
+            elseif Shelf._cust_reopen then
+                Shelf._cust_reopen()
+            end
         end
     end)
 end
 
-function Shelf:openSettings()
-    -- 分级导航: 保留书架在下层
-    if self._settings_menu then
-        pcall(function() UIManager:close(self._settings_menu) end)
-        self._settings_menu = nil
-    end
-
-    local function reopen()
-        self:openSettings()
+-- 「⚙ 设置」页 (三级): 服务器 / 预下载 各收进一个四级子菜单, 其余项在本页直接改
+function Shelf:settingsItems()
+    -- 原生路径: 换掉整页让数值/开关跟着刷新; 自绘路径: 重画当前自绘页
+    local function reopen(tm)
+        if tm then
+            tm.item_table = Shelf:settingsItems()
+            tm:updateItems()
+        elseif Shelf._cust_reopen then
+            Shelf._cust_reopen()
+        end
     end
 
     local items = {
         {
-            text = "(各项修改后即时保存, 点右上角 X 退出)",
-            enabled = false,
+            text = "服务器设置",
+            sub_item_table_func = function() return Shelf:serverItems() end,
         },
         {
-            text = "服务器地址: " .. tostring(settings.get("server")),
+            text = "预下载",
+            sub_item_table_func = function() return Shelf:prefetchItems() end,
+        },
+        {
+            text = string.format("缓存上限: %dMB", tonumber(settings.get("cache_limit")) or 300),
+            keep_menu_open = true,
+            callback = function(tm)
+                UI.input("缓存上限MB (50-2000)", tostring(tonumber(settings.get("cache_limit")) or 300), "超过后自动清理最久未看的图片", function(v)
+                    local n = tonumber(v)
+                    if n then
+                        n = math.max(50, math.min(2000, math.floor(n)))
+                        settings.set("cache_limit", n)
+                        reopen(tm)
+                        UI.info("已保存", 1)
+                    end
+                end)
+            end,
+        },
+        {
+            text = "自动删除旧章节缓存 (隔两章)",
+            checked_func = function() return settings.get("auto_clear_chapter") ~= false end,
+            keep_menu_open = true,
             callback = function()
+                settings.set("auto_clear_chapter", settings.get("auto_clear_chapter") == false)
+            end,
+        },
+        {
+            text = "图片代理缩放",
+            checked_func = function() return settings.get("proxy_image") ~= false end,
+            keep_menu_open = true,
+            callback = function()
+                settings.set("proxy_image", settings.get("proxy_image") == false)
+            end,
+        },
+        {
+            text = "退出时同步进度到APP",
+            checked_func = function() return settings.get("sync_progress") ~= false end,
+            keep_menu_open = true,
+            callback = function()
+                settings.set("sync_progress", settings.get("sync_progress") == false)
+            end,
+        },
+    }
+    -- 注: 「只看漫画」开关在「☰ 漫画书架」页顶部, 这里不重复放
+
+    local total, count = require("comic/cache").usage()
+    table.insert(items, {
+        text = string.format("清空图片缓存 (%.1fMB / %d张)", total / 1024 / 1024, count),
+        keep_menu_open = true,
+        callback = function(tm)
+            UI.confirm("确定清空所有已缓存图片?", function(ok)
+                if ok then
+                    require("comic/cache").clear()
+                    -- 先重建本页(重算 usage), 再弹提示: 反过来的话提示会被全屏菜单盖住;
+                    -- 不重建的话那行"清空图片缓存 (12.3MB / 40张)"会一直停在旧数字。
+                    reopen(tm)
+                    UI.info("缓存已清空")
+                end
+            end)
+        end,
+    })
+
+    return items
+end
+
+-- 四级「服务器设置」: 服务器地址 + 用户名 + 密码 (Legado Web 服务验证, 可留空)
+function Shelf:serverItems()
+    local function reopen(tm)
+        if tm then
+            tm.item_table = Shelf:serverItems()
+            tm:updateItems()
+        elseif Shelf._cust_reopen then
+            Shelf._cust_reopen()
+        end
+    end
+
+    return {
+        {
+            -- 下面这些都会弹输入框: 本页必须留在下层, 不然存完就无家可归了
+            text = "服务器地址: " .. tostring(settings.get("server")),
+            keep_menu_open = true,
+            callback = function(tm)
                 UI.input("服务器地址", settings.get("server"), "http://192.168.1.8:1122", function(v)
                     if v and v ~= "" then
                         settings.set("server", v)
-                        reopen()
+                        reopen(tm)
                         UI.info("已保存", 1)
                     end
                 end)
@@ -597,114 +782,65 @@ function Shelf:openSettings()
         },
         {
             text = "用户名 (Web服务验证, 可空): " .. tostring(settings.get("user")),
-            callback = function()
+            keep_menu_open = true,
+            callback = function(tm)
                 UI.input("用户名", settings.get("user"), "可留空", function(v)
                     settings.set("user", v or "")
-                    reopen()
+                    reopen(tm)
                     UI.info("已保存", 1)
                 end)
             end,
         },
         {
             text = "密码 (Web服务验证, 可空)",
-            callback = function()
+            keep_menu_open = true,
+            callback = function(tm)
                 UI.input("密码", settings.get("pwd"), "可留空", function(v)
                     settings.set("pwd", v or "")
-                    reopen()
+                    reopen(tm)
                     UI.info("已保存", 1)
                 end, true)
             end,
         },
+    }
+end
+
+-- 四级「预下载」: 预取张数(翻页提前下几张) + 整章预下载(进章后后台下完本章)
+function Shelf:prefetchItems()
+    local function reopen(tm)
+        if tm then
+            tm.item_table = Shelf:prefetchItems()
+            tm:updateItems()
+        elseif Shelf._cust_reopen then
+            Shelf._cust_reopen()
+        end
+    end
+
+    return {
         {
             text = "预取张数: " .. tostring(settings.get("prefetch")),
-            callback = function()
+            keep_menu_open = true,
+            callback = function(tm)
                 UI.input("预取张数 (0-20)", tostring(settings.get("prefetch")), "翻页提前下载的张数", function(v)
                     local n = tonumber(v)
                     if n then
                         n = math.max(0, math.min(20, math.floor(n)))
                         settings.set("prefetch", n)
-                        reopen()
+                        reopen(tm)
                         UI.info("已保存", 1)
                     end
                 end)
             end,
         },
         {
-            text = "整章预下载(进章后后台下完本章): " .. ((settings.get("prefetch_whole_chapter") == true) and "开" or "关"),
+            text = "整章预下载 (进章后后台下完本章)",
+            checked_func = function() return settings.get("prefetch_whole_chapter") == true end,
+            keep_menu_open = true, -- 勾选框自己会刷新, 不用重画整页
             callback = function()
                 settings.set("prefetch_whole_chapter", settings.get("prefetch_whole_chapter") ~= true)
-                reopen()
-                UI.info("已保存", 1)
-            end,
-        },
-        {
-            text = string.format("缓存上限: %dMB", tonumber(settings.get("cache_limit")) or 300),
-            callback = function()
-                UI.input("缓存上限MB (50-2000)", tostring(tonumber(settings.get("cache_limit")) or 300), "超过后自动清理最久未看的图片", function(v)
-                    local n = tonumber(v)
-                    if n then
-                        n = math.max(50, math.min(2000, math.floor(n)))
-                        settings.set("cache_limit", n)
-                        reopen()
-                        UI.info("已保存", 1)
-                    end
-                end)
-            end,
-        },
-        {
-            text = "自动删除旧章节缓存(隔两章): " .. ((settings.get("auto_clear_chapter") ~= false) and "开" or "关"),
-            callback = function()
-                settings.set("auto_clear_chapter", settings.get("auto_clear_chapter") == false)
-                reopen()
-                UI.info("已保存", 1)
-            end,
-        },
-        {
-            text = "图片代理缩放: " .. ((settings.get("proxy_image") ~= false) and "开" or "关"),
-            callback = function()
-                settings.set("proxy_image", settings.get("proxy_image") == false)
-                reopen()
-                UI.info("已保存", 1)
-            end,
-        },
-        {
-            text = "退出时同步进度到APP: " .. ((settings.get("sync_progress") ~= false) and "开" or "关"),
-            callback = function()
-                settings.set("sync_progress", settings.get("sync_progress") == false)
-                reopen()
-                UI.info("已保存", 1)
             end,
         },
     }
-    -- 注: 「只看漫画」开关在书架列表顶部, 这里不重复放
-
-    local total, count = require("comic/cache").usage()
-    table.insert(items, {
-        text = string.format("清空图片缓存 (%.1fMB / %d张)", total / 1024 / 1024, count),
-        callback = function()
-            UI.confirm("确定清空所有已缓存图片?", function(ok)
-                if ok then
-                    require("comic/cache").clear()
-                    -- 先重建菜单(重算 usage), 再弹提示: 反过来的话提示会被全屏菜单盖住;
-                    -- 不重建的话菜单上那行"清空图片缓存 (12.3MB / 40张)"会一直停在旧数字。
-                    reopen()
-                    UI.info("缓存已清空")
-                end
-            end)
-        end,
-    })
-    table.insert(items, {
-        text = "←  返回",
-        callback = function()
-            if self._settings_menu then
-                UIManager:close(self._settings_menu)
-                self._settings_menu = nil
-            end
-            Shelf:show()
-        end,
-    })
-
-    self._settings_menu = showMenu("Legado 漫画 - 设置", items)
 end
 
 return Shelf

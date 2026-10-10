@@ -80,11 +80,14 @@ end
 
 function LegadoComic:addToMainMenu(menu_items)
     if not (self.ui and menu_items) then return end
+    -- 一级只给「Legado 漫画」一项, 点开才是二级 (☰漫画书架 / ⭐收藏夹 / ⚙设置) ——
+    -- 与「微信读书」插件同款写法: 用 sub_item_table_func 交下一级内容, 由 KOReader
+    -- 自己画 ▸ 和处理返回导航 (用 callback 弹自绘菜单就没有这层箭头, 层级看不清)。
     menu_items.legadocomic = {
         text = "Legado 漫画",
         sorting_hint = "tools",
-        callback = function()
-            Shelf:show()
+        sub_item_table_func = function()
+            return Shelf:mainMenuItems()
         end,
     }
 end
