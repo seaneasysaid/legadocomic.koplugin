@@ -92,12 +92,6 @@ local function apply_comic_filter(books)
     return out, hidden
 end
 
--- 顶层三项直达入口共用的「上次缓存的书架」(纯本地读, 不联网)
-local function cached_books()
-    local cached = settings.open():readSetting("shelf_cache")
-    return (type(cached) == "table") and cached.books or nil
-end
-
 -- 计算"续读点": 取 本机进度 与 App 进度(durChapter*) 中较新的一份。
 -- 本机 ts 是秒; App durChapterTime 可能是毫秒(13位)或秒(10位), 统一成秒后再比。
 -- 返回 { ch = 目录位置(1-based), img = 章内位置, title = 章节标题, from_app = bool } 或 nil。
@@ -170,6 +164,7 @@ end
 -- 关闭 Shelf 打开过的所有菜单, 防止叠层导致 X 要点多次
 function Shelf:closeAllMenus()
     for _, k in ipairs({
+        "_shelf_menu",     -- 顶层
         "_list_menu",      -- ☰ 书架
         "_favlist_menu",   -- ⭐ 收藏
         "_chapter_menu",   -- 章节列表
@@ -359,6 +354,7 @@ function Shelf:openFavList(books)
                     UIManager:close(self._favlist_menu)
                     self._favlist_menu = nil
                 end
+                Shelf:show()
             end,
         },
         {
@@ -411,6 +407,7 @@ function Shelf:openShelfList(books)
                     UIManager:close(self._list_menu)
                     self._list_menu = nil
                 end
+                Shelf:show()
             end,
         },
         {
@@ -428,25 +425,6 @@ function Shelf:openShelfList(books)
             end,
         },
     }
-
-    -- 「继续阅读」直达: 有本机进度时插在「← 返回」之后, 一键回到上次那张
-    local latest = Progress.latest()
-    if type(latest) == "table" and type(latest.bookUrl) == "string" then
-        local label = "▶  继续阅读: " .. tostring(latest.name or latest.bookUrl)
-        if latest.ch then label = label .. "   [第" .. tostring(latest.ch) .. "话]" end
-        local cont_book = {
-            name = latest.name, author = latest.author or "",
-            bookUrl = latest.bookUrl, origin = latest.origin,
-        }
-        table.insert(items, 2, {
-            text = label,
-            callback = function()
-                -- 第 4 参传总章数(进度记录里存过): 末章边界提示与预取末章保护才生效
-                Shelf:openReader(cont_book, tonumber(latest.ch) or 1, tonumber(latest.img) or 1,
-                    tonumber(latest.total))
-            end,
-        })
-    end
 
     if #all > 0 then
         table.insert(items, { text = filter_on and "── 漫画 ──" or "── 全部书籍 ──", enabled = false })
@@ -507,37 +485,63 @@ function Shelf:toggleFavorite(book)
     UI.info(is_fav and ("⭐ 已加入收藏: " .. book.name) or ("已取消收藏: " .. book.name), 2)
 end
 
--- 菜单栏「漫画书架」直达 (工具 tab 三项之一; 原来的聚合层已取消)
-function Shelf:showShelf()
-    -- 传回调: 断网时先开 Wi-Fi, 连上后自动打开(不传回调则这次点击丢失)
-    if NetworkMgr:willRerunWhenConnected(function() Shelf:showShelf() end) then return end
-    self:closeAllMenus()
-    Shelf:openShelfList(cached_books())
-end
-
--- 菜单栏「收藏夹」直达
-function Shelf:showFavs()
-    if NetworkMgr:willRerunWhenConnected(function() Shelf:showFavs() end) then return end
-    self:closeAllMenus()
-    Shelf:openFavList(cached_books())
-end
-
--- 兼容旧调用方(遥控器 dispatcher / 手势): 现在等价于直接打开书架
+-- 二级入口 (点一级「Legado 漫画」进入): ☰漫画书架 / ⭐收藏夹 / ⚙设置 三个固定入口
+-- (+ 有本机进度时置顶的「继续阅读」直达). 书全部收进「☰ 漫画书架」子菜单、
+-- 收藏收进「⭐ 收藏夹」子菜单, 所以书架上有 3 本还是 300 本, 这一层的样子都不变.
 function Shelf:show()
-    Shelf:showShelf()
-end
+    -- 传回调: 断网时先开 Wi-Fi, 连上后自动把书架弹出来(不传回调则这次点击丢失)
+    if NetworkMgr:willRerunWhenConnected(function() Shelf:show() end) then return end
+    self:closeAllMenus()
 
--- 菜单栏条目的实时文本 (计数取自上次缓存, 纯本地; 供 KOReader 的 text_func 调用)
-function Shelf:shelfEntryText()
-    local shown, hidden = apply_comic_filter(cached_books())
-    if hidden > 0 then
-        return string.format("☰  漫画书架 (%d 本 · 隐藏 %d)", #shown, hidden)
+    -- 顶层不列书, 只读上次缓存的书架算个数; 仍然不自动联网
+    local cached = settings.open():readSetting("shelf_cache")
+    local books = (type(cached) == "table") and cached.books or nil
+    local shown, hidden = apply_comic_filter(books)
+
+    local items = {}
+
+    -- 「继续阅读」直达: 有本机进度时置顶, 一键回到上次那张, 省去 进书架→选书→选章 三步
+    local latest = Progress.latest()
+    if type(latest) == "table" and type(latest.bookUrl) == "string" then
+        local label = "▶  继续阅读: " .. tostring(latest.name or latest.bookUrl)
+        if latest.ch then label = label .. "   [第" .. tostring(latest.ch) .. "话]" end
+        local cont_book = {
+            name = latest.name, author = latest.author or "",
+            bookUrl = latest.bookUrl, origin = latest.origin,
+        }
+        table.insert(items, {
+            text = label,
+            callback = function()
+                -- 第 4 参传总章数(进度记录里存过): 末章边界提示与预取末章保护才生效
+                Shelf:openReader(cont_book, tonumber(latest.ch) or 1, tonumber(latest.img) or 1,
+                    tonumber(latest.total))
+            end,
+        })
     end
-    return string.format("☰  漫画书架 (%d 本)", #shown)
-end
 
-function Shelf:favEntryText()
-    return string.format("⭐  收藏夹 (%d 本)", #valid_books(Favs.list()))
+    -- 顺序: ☰ 漫画书架 → ⭐ 收藏夹 → ⚙ 设置
+    table.insert(items, {
+        text = (hidden > 0)
+            and string.format("☰  漫画书架 (%d 本 · 隐藏 %d)", #shown, hidden)
+            or string.format("☰  漫画书架 (%d 本)", #shown),
+        callback = function()
+            Shelf:openShelfList(books)
+        end,
+    })
+    table.insert(items, {
+        text = string.format("⭐  收藏夹 (%d 本)", #valid_books(Favs.list())),
+        callback = function()
+            Shelf:openFavList(books)
+        end,
+    })
+    table.insert(items, {
+        text = "⚙  设置 (服务器/预取/缓存)",
+        callback = function()
+            Shelf:openSettings()
+        end,
+    })
+
+    self._shelf_menu = showMenu("Legado 漫画", items)
 end
 
 -- 手动刷新书架 (从「☰ 书架」菜单进入, 刷完留在这一层)
@@ -696,6 +700,7 @@ function Shelf:openSettings()
                 UIManager:close(self._settings_menu)
                 self._settings_menu = nil
             end
+            Shelf:show()
         end,
     })
 
