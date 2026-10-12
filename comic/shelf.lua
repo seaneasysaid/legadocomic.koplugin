@@ -10,6 +10,7 @@ local Progress = require("comic/progress")
 local UI = require("comic/ui")
 local settings = require("comic/settings")
 local Favs = require("comic/favs")
+local About = require("comic/about")
 
 local Shelf = {}
 
@@ -334,7 +335,8 @@ end
 -- ================= 菜单内容 (KOReader 原生菜单项) =================
 -- 一级「Legado 漫画」由 main.lua 注册 (sub_item_table_func), 点开就是 mainMenuItems();
 -- 「☰ 漫画书架」「⭐ 收藏夹」不挂 sub_item_table_func (不做成原生三级菜单): 点一下直接开
--- 自绘窗口, 和遥控器/手势入口同一个观感; 只有「⚙ 设置」继续往下走原生子菜单。
+-- 自绘窗口, 和遥控器/手势入口同一个观感; 只有「⚙ 设置」继续往下走原生子菜单,
+-- 「关于」排在它下面, 点一下弹 InfoMessage。
 -- 遥控器/手势入口 (Shelf:show) 走文件末尾的自绘适配, 内容用的是同一批 builder。
 
 -- 上次刷新缓存下来的书架(list); 各页共用, 只读本地不联网
@@ -346,7 +348,8 @@ end
 -- 自绘页适配器定义在文件下方, 这里先声明 —— mainMenuItems 里的回调要用到它
 local open_custom_page
 
--- 二级页: 「▶ 继续阅读」(有本机进度时) + ☰漫画书架 / ⭐收藏夹 / ⚙设置
+-- 二级页: 「▶ 继续阅读」(有本机进度时) + ☰漫画书架 / ⭐收藏夹 / ⚙设置 / 关于
+-- 入口文字不带本数: 「几本 / 隐藏几本」在各自的列表页里更清楚, 这里保持短行。
 function Shelf:mainMenuItems()
     local items = {}
 
@@ -369,15 +372,9 @@ function Shelf:mainMenuItems()
         })
     end
 
-    -- text_func: 每次重画本页都重新算本数(不联网)
+    -- 入口上不显示本数/隐藏数: 数字在书架页里看得更全, 二级菜单保持短一行, 一屏看清所有入口。
     table.insert(items, {
-        text_func = function()
-            local shown, hidden = apply_comic_filter(cached_shelf_books())
-            if hidden > 0 then
-                return string.format("☰  漫画书架 (%d 本 · 隐藏 %d)", #shown, hidden)
-            end
-            return string.format("☰  漫画书架 (%d 本)", #shown)
-        end,
+        text = "☰  漫画书架",
         -- 直接开自绘窗口: keep_menu_open 让原生二级菜单留在下层, 关掉窗口就回到这里;
         -- custom_page 是给自绘路径(遥控器/手势)看的 —— 那边翻成"开新页 + ← 返回"
         keep_menu_open = true,
@@ -389,9 +386,7 @@ function Shelf:mainMenuItems()
         end,
     })
     table.insert(items, {
-        text_func = function()
-            return string.format("⭐  收藏夹 (%d 本)", #valid_books(Favs.list()))
-        end,
+        text = "⭐  收藏夹",
         keep_menu_open = true,
         callback = function()
             Shelf:openFavWindow()
@@ -405,6 +400,16 @@ function Shelf:mainMenuItems()
         text = "⚙  设置",
         sub_item_table_func = function()
             return Shelf:settingsItems()
+        end,
+    })
+    -- 「关于」: 排在「设置」下面的独立弹窗(InfoMessage), 介绍插件 + 版本号 + 当前状态。
+    -- keep_menu_open: 原生路径下二级菜单留在弹窗下层, 关掉弹窗回到这里;
+    -- 自绘路径(遥控器/手势)没这个概念, 但同一份 builder 会被翻成普通 callback, 行为一致。
+    table.insert(items, {
+        text = "关于",
+        keep_menu_open = true,
+        callback = function()
+            About.show()
         end,
     })
     return items
