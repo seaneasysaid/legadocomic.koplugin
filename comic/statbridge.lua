@@ -202,6 +202,14 @@ function M:start(book)
     local id, err = self:_getOrCreateBook(book, M.identityForBook(book), now)
     if not id then
         logger.warn("legadocomic stats bridge unavailable:", err)
+        -- 必须把状态清干净: 否则上一次 start 成功留下的 book_id/_anchor 会被这一轮沿用,
+        -- _flushSpan 会把**当前这本书**的时长写到**上一本书**的 id_book 上
+        -- (statistics.sqlite3 里的错误数据不可逆)。清空后退化成"本会话不统计", 不影响阅读。
+        self.book_id = nil
+        self.book = nil
+        self._anchor = nil
+        self._pending = 0
+        self._seen_order = {}
         return false
     end
     self.book_id = id
@@ -244,7 +252,9 @@ function M:close()
     logger.info("legadocomic stats: close, flushing tail")
     pcall(self._flushSpan, self, os.time())
     self.book_id = nil
+    self._anchor = nil -- 一并清: 与 start() 失败分支保持一致, 避免残留计时锚点
     self._pending = 0
+    self._seen_order = {}
 end
 
 return M

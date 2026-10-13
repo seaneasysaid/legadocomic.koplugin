@@ -6,10 +6,14 @@ local InputDialog = require("ui/widget/inputdialog")
 
 local M = {}
 
+-- timeout 语义: 不传 = 3 秒自动消失; 传 0 = 不自动消失(常驻)。
+-- ⚠️ 勘误: 审查报告曾说"`timeout or 3` 在 timeout=0 时会退化成 3"——**不成立**。
+-- Lua 里 0 是 truthy, `0 or 3` 的结果就是 **0**, 原写法本来就对。
+-- 这里只是把"未传"和"显式传 0"的区分写明确一点, 行为与原来完全一致。
 function M.info(text, timeout)
     UIManager:show(InfoMessage:new{
         text = text,
-        timeout = timeout or 3,
+        timeout = (timeout ~= nil) and timeout or 3,
     })
 end
 

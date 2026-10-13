@@ -25,7 +25,27 @@ local function md5hex(str)
     return string.format("%08x", h)
 end
 
-M.key = function(url) return md5hex(url) end
+-- 缓存 key: 除 url 外还要并入**变体维度**(是否走代理缩放、屏宽)。
+-- 背景: 开启「图片代理」时缓存的其实是**被 Legado 按屏宽缩放过的**字节, 而 key 只取 url。
+-- 于是关掉代理(或换设备/改屏宽)后 key 不变 -> 永久吐出旧的低清缩放图, 只能手动清缓存。
+-- 这里把变体并进 key: 不同变体各自缓存, 互不污染。
+-- ⚠️ reader.lua 算 keep_keys 用的也是本函数, 两边天然一致。
+local function variant_tag()
+    local ok, settings = pcall(require, "comic/settings")
+    local proxy = true
+    if ok and type(settings) == "table" and type(settings.get) == "function" then
+        proxy = settings.get("proxy_image") ~= false
+    end
+    if not proxy then return "d" end -- direct: 直连原图, 与屏宽无关
+    local ok_dev, Device = pcall(require, "device")
+    local w = 800
+    if ok_dev and Device and Device.screen and Device.screen.getWidth then
+        w = Device.screen:getWidth() or 800
+    end
+    return "p" .. tostring(w)
+end
+
+M.key = function(url) return md5hex(variant_tag() .. "\0" .. tostring(url)) end
 
 local put_count = 0
 local function maybePrune()
@@ -61,7 +81,25 @@ function M.get(key)
     return data
 end
 
+-- 图片魔数校验: 只放行真正的图片字节。
+-- Legado/代理偶发返回 200 + 一段 HTML(错误页/占位页)时, 旧代码会把它当图片写进缓存,
+-- 之后 Cache.has 恒真 → 预取永远跳过、翻页永远拿到这张坏数据, 重试也救不回来,
+-- 只能去设置里手动清缓存。宁可这次不缓存(下次还能重试), 也不要缓存坏数据。
+local function looks_like_image(data)
+    if type(data) ~= "string" or #data < 3 then return false end
+    if data:sub(1, 8) == "\137PNG\r\n\26\n" then return true end                       -- PNG
+    if data:sub(1, 3) == "\255\216\255" then return true end                           -- JPEG
+    if data:sub(1, 6) == "GIF87a" or data:sub(1, 6) == "GIF89a" then return true end   -- GIF
+    if data:sub(1, 2) == "BM" then return true end                                     -- BMP
+    if #data >= 12 and data:sub(1, 4) == "RIFF" and data:sub(9, 12) == "WEBP" then return true end -- WebP
+    return false
+end
+
 function M.put(key, data)
+    if not looks_like_image(data) then
+        logger.warn("cache: refuse non-image data, key=" .. tostring(key))
+        return false
+    end
     ensure_dir()
     local tmp = M.path(key) .. ".tmp"
     -- 第 3 参是 force_flush(fsync), 不是"检查空间"。缓存图本身是可再生的,
@@ -139,7 +177,15 @@ end
 
 -- 删除 keep_keys(md5 集合)之外、修改时间早于 ts 的缓存文件
 -- 用于"隔章自动清理": 不依赖会话内记忆, 孤儿文件(上个会话遗留)也能清掉
+--
+-- ⚠️ 加节流: 本函数要遍历**整个**缓存目录并逐文件 stat, 上千张图时在 UI 线程上要几十~几百 ms。
+-- 而它每翻一章都会被调用一次 -> 每章都卡一下。同一分钟内重复调用直接跳过
+-- (清理本身是"删旧图"的惰性操作, 晚一分钟没有任何影响)。
+local _last_prune_before = 0
 function M.pruneBefore(ts, keep_keys)
+    local now = os.time()
+    if now - _last_prune_before < 60 then return 0 end
+    _last_prune_before = now
     ensure_dir()
     local removed = 0
     for entry in lfs.dir(cache_dir) do

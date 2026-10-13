@@ -61,7 +61,9 @@ function M:fetchImgList(ch_index)
         content = data.data or data.content or ""
         title = data.title
     end
-    local urls = Api.extractImageUrls(content)
+    -- 传 bookUrl 进去: 正文里的相对地址(src="/x.jpg"、src="//cdn/x.jpg")要靠它补成绝对地址,
+    -- 否则 httpreq 会以"不支持的协议"整体失败 -> 整章无图。
+    local urls = Api.extractImageUrls(content, self.book.bookUrl)
     if #urls == 0 then
         return nil, "章节内没有图片 (可能不是漫画, 或换源后内容为空)"
     end
@@ -215,11 +217,16 @@ function M:onClose()
         -- 改为推到 widget 关掉之后再发(延迟 0.05s), 失败也不影响退出。
         local book, cur_ch, cur_img = self.book, self.cur_ch, self.cur_img
         local title, total_ch = self.chapter_title, self.total_ch
+        -- img 要**双向**夹取: widget 可能是手工构造的(cur_img 为 nil), 也可能停在越界值上;
+        -- 原样写进进度后, 下次续读会拿去当 start_img —— 虽然 _applyPage 会再夹一次,
+        -- 但配置里长期存着非法页码本身就是脏数据。
+        local n = #self.imglist
+        local img = math.min(math.max(tonumber(cur_img) or 1, 1), math.max(n, 1))
         pcall(function()
-            Progress.save(book, cur_ch, cur_img, title, total_ch)
+            Progress.save(book, cur_ch, img, title, total_ch)
         end)
         UIManager:scheduleIn(0.05, function()
-            pcall(function() Api.saveBookProgress(book, cur_ch, title, cur_img) end)
+            pcall(function() Api.saveBookProgress(book, cur_ch, title, img) end)
         end)
     end
     pcall(function() StatBridge:close() end)
@@ -266,9 +273,11 @@ function M:onTap(_, ges)
     elseif x > w * 2 / 3 then
         self:turnPage(1)
     else
-        if type(ImageViewer.onTap) == "function" then
-            return ImageViewer.onTap(self, nil, ges) -- 中间: 菜单
-        end
+        -- 中间 1/3: **不能**回落父类 —— 单图模式下 ImageViewer:onTap 的中间语义是
+        -- `buttons_visible = not buttons_visible`(imageviewer.lua:544-548), 于是漫画页
+        -- 点中间会弹出一整条缩放/旋转工具栏(还把图片压小), 完全不是我们要的"呼出菜单"。
+        -- 漫画语义下中间=呼出目录, 与遥控页的「目录」按钮一致。
+        self:showTocMenu()
     end
     return true
 end
@@ -309,7 +318,7 @@ function M:turnPages(n)
     end
     -- 跨章: 不做"多章累加"(那得把中间章节全拉下来数图), 直接落到相邻章首页/末页, 行为可预期
     if dir > 0 then
-        if self.total_ch and self.cur_ch >= self.total_ch then
+        if self:_atLastChapter() then
             UI.info("已经是最后一章")
             return
         end
@@ -398,6 +407,20 @@ function M:showTocMenu()
     end)
 end
 
+-- 是否已经在最后一章。
+-- total_ch 已知时直接比; 未知时(从「继续阅读」直达、目录映射还没建)退回用
+-- Api.chapterCount 再探一次 —— 该函数只查映射缓存、不发网络请求, 零成本。
+-- 原来只写 `self.total_ch and self.cur_ch >= self.total_ch`, total_ch 为 nil 时保护整体失效,
+-- 会去请求一个不存在的下一章: 轻则弹"获取失败", 重则某些书源对越界 index 返回兜底内容 ->
+-- 页码错乱。
+function M:_atLastChapter()
+    if not self.total_ch then
+        self.total_ch = Api.chapterCount(self.book.bookUrl)
+    end
+    if not self.total_ch then return false end -- 仍然不知道总章数: 不拦, 交给空列表兜底
+    return self.cur_ch >= self.total_ch
+end
+
 -- 方向翻页: step = ±1, 跨章无缝
 function M:turnPage(step)
     local target_img = self.cur_img + step
@@ -413,7 +436,7 @@ function M:turnPage(step)
         target_img = -1 -- 表示待获取上一章末页
     elseif target_img > #self.imglist then
         -- 前进到下一章
-        if self.total_ch and self.cur_ch >= self.total_ch then
+        if self:_atLastChapter() then
             UI.info("已经是最后一章")
             return
         end
@@ -475,10 +498,17 @@ function M:_autoClearOldChapters(new_ch)
     -- 保留集合 = 当前章 + 下一章 + 上一章。上一章必须显式保留: step 1 的删除阈值是 new_ch-2,
     -- 上一章本就要留, 但之前 keep_keys 漏了它, 会让「跨会话缓存的上-章图片」被 pruneBefore 误删,
     -- 与函数注释「上一章保留方便回翻」矛盾。
+    --
+    -- ⚠️ 时间基准要**往回退一个宽限期**: pruneBefore 是按 mtime 扫**整个**缓存目录的, 没有
+    -- bookUrl 维度 —— 若直接用"本次打开漫画的时间", 用户在同一会话里换一本书看, 上一本书的
+    -- 缓存(还有别的没读完的书)会因为 mtime 更早而被整片删掉。
+    -- 退 7 天之后: 很久以前的孤儿照样清得掉, 而最近读过的书不会被误伤。
+    local PRUNE_GRACE_SECONDS = 7 * 24 * 3600
     local keep_keys = {}
     for u in pairs(keep) do keep_keys[Cache.key(u)] = true end
     for _, u in ipairs(lists[new_ch - 1] or {}) do keep_keys[Cache.key(u)] = true end
-    removed = removed + Cache.pruneBefore(self._session_start or os.time(), keep_keys)
+    local cutoff = (self._session_start or os.time()) - PRUNE_GRACE_SECONDS
+    removed = removed + Cache.pruneBefore(cutoff, keep_keys)
     if removed > 0 then
         logger.info("legadocomic auto-cleared", removed, "cached images (entering ch", new_ch, ")")
     end
@@ -516,9 +546,16 @@ function M:_applyPage(ch_index, img_index, list, title)
     self.cur_ch = ch_index
     self.imglist = list
     self.cur_img = img_index
-    -- 标题: 优先用调用方传入的, 否则查目录(标题以 /getChapterList 为准)
-    local resolved_title = title or Api.chapterTitle(self.book.bookUrl, ch_index)
-    if resolved_title then self.chapter_title = resolved_title end
+    -- 标题: 优先用调用方传入的, 否则查目录(标题以 /getChapterList 为准)。
+    -- ⚠️ 换章时标题必须**跟着换**: 解析不到就清空 —— 保留旧值会让本地进度和上报 App 的
+    -- durChapterTitle 继续沿用上一章, 而 durChapterIndex 已经是新章("章节号对、标题错一章")。
+    -- 同章内翻页时调用方不传标题(title 为 nil), 这时绝不能清, 否则每翻一页都会把
+    -- 已经解析好的标题冲掉。
+    if ch_index ~= old_ch then
+        self.chapter_title = title or Api.chapterTitle(self.book.bookUrl, ch_index)
+    elseif title then
+        self.chapter_title = title
+    end
     -- 总章数兜底: 目录已在映射缓存里时零成本(从「继续阅读」直达进来时 options.total_ch 为 nil)
     if not self.total_ch then self.total_ch = Api.chapterCount(self.book.bookUrl) end
     if ch_index ~= old_ch then
@@ -526,6 +563,13 @@ function M:_applyPage(ch_index, img_index, list, title)
         self._loaded_lists = self._loaded_lists or {}
         if old_ch and old_list and #old_list > 0 then
             self._loaded_lists[old_ch] = old_list
+        end
+        -- ⚠️ 也要登记**新落到这一章**的列表: _autoClearOldChapters 用 lists[new_ch-1] 来
+        -- "保留上一章", 而该表只在"离开某章"时才写入。TOC 从第1话直接跳到第5话时,
+        -- 第4话从没被"离开"过 -> lists[4] 为空 -> 第4话的缓存会被 pruneBefore 按时间误删,
+        -- 与函数注释「上一章保留方便回翻」矛盾。这里补登记后, 跳章场景也能正确保留上一章。
+        if #list > 0 then
+            self._loaded_lists[ch_index] = list
         end
         -- 跨章后旧预取失效(下一章列表若匹配则已在 gotoPage 中消费)
         self.next_list = nil
@@ -592,17 +636,22 @@ end
 function M:prefetchStep(count)
     count = count or 0
     local n = tonumber(settings.get("prefetch")) or 2
-    -- 「整章预下载」开启时, 把预取范围扩到覆盖本章剩余全部图片(仍逐张下, 不阻塞 UI)
+    -- 「整章预下载」开启时, 把预取范围扩到覆盖本章剩余全部图片(仍逐张下, 不阻塞 UI)。
+    -- ⚠️ 必须封顶: 每个 tick 只下一张(下面 break), tick 间隔 0.5s, 且下载本身是 UI 线程上的
+    -- 同步 HTTP。200 张的章节按 `n = remain` 原样展开要 200+ 个 tick(≈100s 里界面反复被同步
+    -- 请求占用), 表现为长时间卡顿。封顶之后每章最多的"主动预下载"就被限制在 60 张内,
+    -- 剩下的图仍会在翻到时按需下载(不影响正确性, 只是不再提前囤)。
+    local PREFETCH_WHOLE_MAX = 60
     if settings.get("prefetch_whole_chapter") == true and self.imglist then
         local remain = #self.imglist - self.cur_img + 1
-        if remain > n then n = remain end
+        if remain > n then n = math.min(remain, PREFETCH_WHOLE_MAX) end
     end
     if self._closed then return end
 
     -- 确保"下一章列表"已就绪(提前取, 跨章翻页零等待); 与图片预取数无关。
     -- 失败也要计数: 这是 UI 线程上的同步请求(超时 25s), 不加闸的话每 0.5s 一个 tick 都会重发,
     -- 弱网下等于把界面反复冻住。翻页会 schedulePrefetch(把计数清零) -> 重新给机会。
-    if not self.next_list and not (self.total_ch and self.cur_ch >= self.total_ch)
+    if not self.next_list and not self:_atLastChapter()
         and (self._nextlist_fail or 0) < PREFETCH_MAX_FAIL then
         local list, title_or_err = self:fetchImgList(self.cur_ch + 1)
         if list then

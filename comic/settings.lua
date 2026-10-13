@@ -15,6 +15,9 @@ local DEFAULTS = {
     sync_progress = true, -- 关闭阅读器时同步进度到 app
     auto_clear_chapter = true, -- 换章后自动删除前两章之前的缓存
     comic_only = true,   -- 书架只显示漫画(默认开, 小说源太多时很有用); 开关在书架列表顶部
+    -- 图片缓存上限(MB)。原来只在 cache.lua / shelf.lua 里各自 `tonumber(...) or 300` 兜底,
+    -- 配置文件里**永远没有**这个键; 补进 DEFAULTS 后首次启动就落盘, 三处兜底值也才对得上。
+    cache_limit = 300,
 }
 
 function M.open(path)

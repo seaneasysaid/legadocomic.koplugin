@@ -14,7 +14,11 @@ local About = require("comic/about")
 
 local Shelf = {}
 
-local function showMenu(title, items)
+-- 弹出菜单并把它登记到 owner 的一个字段上; 菜单被"它自己的路径"关掉时(点弹层外 /
+-- 硬件 Back 键 -> Menu:onCloseAllMenus)也要把引用收回来, 否则 owner 那边悬空:
+-- 下次会先 close 一个已经关掉的弹层(重复派发 CloseWidget/FlushSettings)。
+-- reader.lua:395 的目录弹层早就这么修了, 这里补齐。
+local function showMenu(title, items, owner, field)
     local menu = Menu:new{
         title = title,
         item_table = items,
@@ -26,6 +30,7 @@ local function showMenu(title, items)
         height = Screen:getHeight(),
         items_per_page = 14,
         single_line = true,
+        close_callback = (owner and field) and function() owner[field] = nil end or nil,
     }
     UIManager:show(menu)
     return menu
@@ -93,8 +98,13 @@ local function apply_comic_filter(books)
     return out, hidden
 end
 
--- 计算"续读点": 取 本机进度 与 App 进度(durChapter*) 中较新的一份。
+-- 计算"续读点": 取 本机进度 与 App 进度(durChapter*) 中**较新**的一份。
+-- ⭐ 口径（2026-10-14 Sean 定）：本机/App **取新**。
 -- 本机 ts 是秒; App durChapterTime 可能是毫秒(13位)或秒(10位), 统一成秒后再比。
+-- ⚠️ 一致性要求: 顶层「继续阅读」入口(mainMenuItems)和章节页都必须走本函数。
+-- 原来顶层只读 Progress.latest()(纯本机)、章节页走本函数(取新), 同一个"续读到哪"在
+-- 两个入口给出不同答案 —— App 上读过、设备没读过的书, 刷新书架后顶层入口不出现,
+-- 点进章节页却有续读提示。
 -- 返回 { ch = 目录位置(1-based), img = 章内位置, title = 章节标题, from_app = bool } 或 nil。
 local function resolveResume(book)
     if type(book) ~= "table" then return nil end
@@ -242,7 +252,8 @@ function Shelf:openChapterDialog(book)
             })
         end
 
-        self._chapter_menu = showMenu(book.name .. "  (" .. tostring(book.author or "") .. ")", items)
+        self._chapter_menu = showMenu(book.name .. "  (" .. tostring(book.author or "") .. ")", items,
+            self, "_chapter_menu")
     end)
 end
 
@@ -258,14 +269,18 @@ function Shelf:openFavManager(books)
     local all = apply_comic_filter(books)
     -- 退化标记只看书架本身有没有书, 不能被下面补进来的收藏掩盖
     local degraded = #all == 0
-    -- 补上「已收藏、但书架里已经没有的书」: 否则书一从 App 书架删掉, 这里就再也取消不掉收藏了
+    -- 补上「已收藏、但书架里已经没有的书」: 否则书一从 App 书架删掉, 这里就再也取消不掉收藏了。
+    -- ⚠️ 去重键必须是 Favs 的**全三元组**(name|author|bookUrl), 不能只看 bookUrl:
+    -- App 侧改过书名或换过源之后, 同一 bookUrl 的三元组已经对不上, 只看 URL 会把它当成
+    -- "书架里还有"而跳过 -> 而「收藏夹」视图只有"打开"没有"取消", 这条收藏就永远取消不掉了。
     local seen = {}
     for _, b in ipairs(all) do
-        if b.bookUrl ~= nil then seen[tostring(b.bookUrl)] = true end
+        local k = Favs.key(b)
+        if k then seen[k] = true end
     end
     for _, f in ipairs(valid_books(Favs.list())) do
-        local k = tostring(f.bookUrl or "")
-        if k ~= "" and not seen[k] then
+        local k = Favs.key(f)
+        if k and not seen[k] then
             f.gone = true
             all[#all + 1] = f
         end
@@ -327,7 +342,7 @@ function Shelf:openFavManager(books)
                 end,
             })
         end
-        self._fav_menu = showMenu("收藏管理 (⭐=已收藏, 点击切换)", items)
+        self._fav_menu = showMenu("收藏管理 (⭐=已收藏, 点击切换)", items, self, "_fav_menu")
     end
     render()
 end
@@ -353,21 +368,54 @@ local open_custom_page
 function Shelf:mainMenuItems()
     local items = {}
 
-    -- 「继续阅读」直达: 有本机进度时置顶, 一键回到上次那张, 省去 进书架→选书→选章 三步
+    -- 「继续阅读」直达: 有进度时置顶, 一键回到上次那张, 省去 进书架→选书→选章 三步。
+    -- ⚠️ 续读点必须走 resolveResume(本机/App 取新), 与章节页同一个口径。
+    -- 原来这里只读 Progress.latest()(纯本机) -> 两个后果:
+    --   ① 顶层入口和章节页对"续读到哪"给出不同答案;
+    --   ② App 上读过、设备从没读过的书, 顶层**根本不出现**入口(本机 Progress 里没有它),
+    --      而点进章节页却有续读提示。
+    -- 所以候选书要两路合取: 本机进度里最新的那本 + 书架缓存里 App 进度最新的那本。
+    local shelf_books = cached_shelf_books()
     local latest = Progress.latest()
+    local cont_book, cont_resume
     if type(latest) == "table" and type(latest.bookUrl) == "string" then
-        local label = "▶  继续阅读: " .. tostring(latest.name or latest.bookUrl)
-        if latest.ch then label = label .. "   [第" .. tostring(latest.ch) .. "话]" end
-        local cont_book = {
+        cont_book = {
             name = latest.name, author = latest.author or "",
             bookUrl = latest.bookUrl, origin = latest.origin,
         }
+        if type(shelf_books) == "table" then enrich_from_shelf(shelf_books)(cont_book) end
+        cont_resume = resolveResume(cont_book)
+    end
+    -- 本机没有任何可用进度时, 从书架缓存里挑"App 进度最新"的一本兜底
+    if not cont_resume and type(shelf_books) == "table" then
+        local best, best_ts
+        for _, b in ipairs(shelf_books) do
+            if type(b) == "table" and type(b.bookUrl) == "string" and b.durChapterIndex ~= nil then
+                local ts = tonumber(b.durChapterTime) or 0
+                if ts > 1e11 then ts = ts / 1000 end
+                if not best_ts or ts > best_ts then best, best_ts = b, ts end
+            end
+        end
+        if best then
+            cont_book = {
+                name = best.name, author = best.author or "",
+                bookUrl = best.bookUrl, origin = best.origin,
+                durChapterIndex = best.durChapterIndex, durChapterPos = best.durChapterPos,
+                durChapterTitle = best.durChapterTitle, durChapterTime = best.durChapterTime,
+            }
+            cont_resume = resolveResume(cont_book)
+        end
+    end
+    if cont_resume and cont_book then
+        local label = "▶  继续阅读: " .. tostring(cont_book.name or cont_book.bookUrl)
+        if cont_resume.ch then label = label .. "   [第" .. tostring(cont_resume.ch) .. "话]" end
+        if cont_resume.from_app then label = label .. "   [APP]" end
         table.insert(items, {
             text = label,
             callback = function()
-                -- 第 4 参传总章数(进度记录里存过): 末章边界提示与预取末章保护才生效
-                Shelf:openReader(cont_book, tonumber(latest.ch) or 1,
-                    tonumber(latest.img) or 1, tonumber(latest.total))
+                -- 第 4 参传总章数: 末章边界提示与预取末章保护才生效
+                Shelf:openReader(cont_book, cont_resume.ch, cont_resume.img,
+                    tonumber(latest and latest.total) or Api.chapterCount(cont_book.bookUrl))
             end,
         })
     end
@@ -491,6 +539,12 @@ function Shelf:shelfListItems(books)
                 if tm then
                     tm.item_table = Shelf:shelfListItems(cached_shelf_books())
                     tm:updateItems()
+                elseif Shelf._cust_reopen then
+                    -- 书架页永远走自绘路径(open_custom_page 是零参调 it.callback(), tm 恒 nil),
+                    -- 少了这一支就只改了设置、屏幕一行不动 —— 表现为"点了没反应"。
+                    -- 同页「只看漫画」开关靠 open_custom_page 里 checked_func 那条兜底,
+                    -- 本项没有 checked_func, 必须自己补。
+                    Shelf._cust_reopen()
                 end
             end,
         })
@@ -633,7 +687,7 @@ open_custom_page = function(title, build, parent)
     end
 
     Shelf._cust_reopen = function() open_custom_page(title, build, parent) end
-    Shelf._cust_menu = showMenu(title, entries)
+    Shelf._cust_menu = showMenu(title, entries, Shelf, "_cust_menu")
 end
 
 -- 遥控器 / 手势入口: 一级「Legado 漫画」→ 二级 漫画书架 / 收藏夹 / 设置

@@ -80,7 +80,10 @@ function M.getChapterList(bookUrl)
 end
 
 function M.getBookContent(bookUrl, index)
-    return M.getJSON("/getBookContent", { url = bookUrl, index = index, v = os.time() }, 25)
+    -- 正文 HTML 通常只有几十 KB。原来给 25s(timeout)/40s(maxtime) 过宽: 预取「下一章列表」
+    -- 每 0.5s 一轮、最多重试 3 次, 弱网下最坏能把 UI 反复冻住两分钟。降到 12s/27s,
+    -- 局域网内取正文绰绰有余, 而最坏冻结时间直接砍掉一半。
+    return M.getJSON("/getBookContent", { url = bookUrl, index = index, v = os.time() }, 12)
 end
 
 -- ===== 章节索引换算 =====
@@ -242,17 +245,46 @@ for _, attr in ipairs(LAZY_ATTRS) do
         IMG_TAG_PREFIX .. "[%s/]" .. ci(attr) .. "%s*=%s*[\"']?([^\"'>%s]+)"
 end
 
-function M.extractImageUrls(content)
+-- 还原 HTML 实体(图片 URL 里出现 `&amp;` 时, 不还原会让查询参数错乱甚至请求被截断)
+local function decode_entities(s)
+    if not s:find("&", 1, true) then return s end
+    s = s:gsub("&amp;", "&")
+    s = s:gsub("&#38;", "&")
+    s = s:gsub("&#x26;", "&")
+    return s
+end
+
+-- 把相对图片地址补成绝对地址(基于 bookUrl 的 scheme+host)。
+-- 背景: 书源正文里常见 `src="/x.jpg"` 或 `src="//cdn/x.jpg"`。原样交给 httpreq 会因为
+-- socket_url.parse 得到 scheme=nil 而返回"不支持的协议" -> **整章图片全失败**, 用户只看到
+-- "页面加载失败"。
+-- 只处理**能明确补全**的这两种; 路径相对的 `a/b.jpg` 基准是原站页面而不是 bookUrl,
+-- 猜错比明确报错更糟, 所以原样返回交给上层报错。
+local function make_absolute(src, base_url)
+    if type(base_url) ~= "string" then return src end
+    if src:sub(1, 2) == "//" then
+        local scheme = base_url:match("^(%a[%w+.-]*)://") or "http"
+        return scheme .. "://" .. src:sub(3)
+    end
+    if src:sub(1, 1) == "/" then
+        local scheme, host = base_url:match("^(%a[%w+.-]*)://([^/]+)")
+        if scheme and host then return scheme .. "://" .. host .. src end
+    end
+    return src
+end
+
+-- 提取正文里的图片地址。第二个参数(可选的 bookUrl)只用于补全相对地址。
+function M.extractImageUrls(content, base_url)
     if type(content) ~= "string" then return {} end
     local urls = {}
-    for src in content:gmatch(IMG_SRC_PATTERN) do
-        if src ~= "" then urls[#urls + 1] = src end
+    local function push(src)
+        if src == "" then return end
+        urls[#urls + 1] = make_absolute(decode_entities(src), base_url)
     end
+    for src in content:gmatch(IMG_SRC_PATTERN) do push(src) end
     if #urls > 0 then return urls end
     for _, pattern in ipairs(LAZY_SRC_PATTERNS) do
-        for src in content:gmatch(pattern) do
-            if src ~= "" then urls[#urls + 1] = src end
-        end
+        for src in content:gmatch(pattern) do push(src) end
         if #urls > 0 then return urls end
     end
     return urls
@@ -278,28 +310,31 @@ function M.downloadImageData(bookUrl, imgSrc)
     end
     candidates[#candidates + 1] = imgSrc
 
-    -- 单次下载的总时长预算(秒): 2 轮 × (代理 + 直连), 单次 maxtime 30s
-    -- → 服务端"连上但不吐数据"时最坏要 120s。这些请求全在 UI 线程上同步跑(翻页 / 预取),
-    -- 所以要有个总闸: 累计超过预算就直接放弃本次下载, 交给上层提示或下次重试。
+    -- 单次下载的总时长预算(秒): 2 轮 × (代理 + 直连), 单次 maxtime 30s。
+    -- 这些请求全在 UI 线程上同步跑(翻页 / 预取), 所以必须有个**真能生效**的总闸:
+    --   ① 每次发起请求**之前**先算剩余预算, 用尽就不再发 —— 旧写法是请求返回之后才检查,
+    --      拦不住已经发出去的那一次, 最坏仍要 ~60s 才发现超预算;
+    --   ② 剩余预算直接当单次请求的 maxtime, "连上但慢滴"的请求也不会跑满 30s 才被放弃。
     local BUDGET_SECONDS = 30
     local last_err
     local started = os.time()
     for attempt = 1, 2 do
         for _, url in ipairs(candidates) do
+            local remain = BUDGET_SECONDS - (os.time() - started)
+            if remain <= 1 then
+                logger.warn("comic image download budget exceeded:", imgSrc, last_err)
+                return nil, tostring(last_err or "图片下载超时")
+            end
             local ok, resp = httpreq.request({
                 url = url,
-                timeout = 15,
-                maxtime = 30,
+                timeout = math.min(15, remain),
+                maxtime = math.min(30, remain),
                 is_pic = true,
             })
             if ok and type(resp.data) == "string" and #resp.data > 0 then
                 return resp.data
             end
             last_err = resp
-            if os.time() - started >= BUDGET_SECONDS then
-                logger.warn("comic image download budget exceeded:", imgSrc, last_err)
-                return nil, tostring(last_err or "图片下载超时")
-            end
         end
     end
     logger.warn("comic image download failed:", imgSrc, last_err)
