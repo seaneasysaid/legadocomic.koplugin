@@ -7,6 +7,8 @@
 
 基于 [pengcw/legado.koplugin](https://github.com/pengcw/legado.koplugin) 的漫画流式阅读部分剥离重构而成，剔除了文本阅读/搜索/换源等功能，只保留「书架 → 章节 → 图片流」链路，并做了大量优化。
 
+完整变更历史见 **[CHANGELOG.md](CHANGELOG.md)**（按时间倒序，含每一轮迭代）。
+
 ## 特性
 
 - **流式翻页**：漫画按张加载、无缝跨话（章节），支持实体按键和触屏翻页
