@@ -2,7 +2,7 @@
 
 [![release](https://img.shields.io/github/v/release/seaneasysaid/legadocomic.koplugin?label=release&color=blue)](https://github.com/seaneasysaid/legadocomic.koplugin/releases)
 [![downloads](https://img.shields.io/github/downloads/seaneasysaid/legadocomic.koplugin/total?label=downloads&color=yellow)](https://github.com/seaneasysaid/legadocomic.koplugin/releases)
-[![changelog](https://img.shields.io/badge/changelog-查看变更历史-green)](CHANGELOG.md)
+[![更新日记](https://img.shields.io/badge/changelog-CHANGELOG-green)](CHANGELOG.md)
 
 一个 **只专注看漫画** 的 KOReader 插件：连接安卓「开源阅读」APP（Legado / 阅读 3.0）的 Web 服务，把书架里的漫画以**流式翻页**的方式在电纸书上阅读。
 
