@@ -2,12 +2,11 @@
 
 [![release](https://img.shields.io/github/v/release/seaneasysaid/legadocomic.koplugin?label=release&color=blue)](https://github.com/seaneasysaid/legadocomic.koplugin/releases)
 [![downloads](https://img.shields.io/github/downloads/seaneasysaid/legadocomic.koplugin/total?label=downloads&color=yellow)](https://github.com/seaneasysaid/legadocomic.koplugin/releases)
+[![changelog](https://img.shields.io/badge/changelog-查看变更历史-green)](CHANGELOG.md)
 
 一个 **只专注看漫画** 的 KOReader 插件：连接安卓「开源阅读」APP（Legado / 阅读 3.0）的 Web 服务，把书架里的漫画以**流式翻页**的方式在电纸书上阅读。
 
 基于 [pengcw/legado.koplugin](https://github.com/pengcw/legado.koplugin) 的漫画流式阅读部分剥离重构而成，剔除了文本阅读/搜索/换源等功能，只保留「书架 → 章节 → 图片流」链路，并做了大量优化。
-
-完整变更历史见 **[CHANGELOG.md](CHANGELOG.md)**（按时间倒序，含每一轮迭代）。
 
 ## 特性
 
