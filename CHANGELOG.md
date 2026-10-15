@@ -441,14 +441,3 @@
 - 补充功能说明与 Release 徽章。
 
 ---
-
-## 版本发布记录
-
-| 版本 | 发布日期 | 说明 |
-| --- | --- | --- |
-| [v1.0.5](https://github.com/seaneasysaid/legadocomic.koplugin/releases/tag/v1.0.5) | 2026-10-10 | 菜单入口调整、整章预加载、稳定性修复 |
-| [v1.0.4](https://github.com/seaneasysaid/legadocomic.koplugin/releases/tag/v1.0.4) | 2026-09-27 | 收藏管理「书架已无」置顶 |
-| [v1.0.3](https://github.com/seaneasysaid/legadocomic.koplugin/releases/tag/v1.0.3) | 2026-09-24 | 只看漫画过滤、返回按钮前置 |
-| [v1.0.2](https://github.com/seaneasysaid/legadocomic.koplugin/releases/tag/v1.0.2) | 2026-09-23 | 双向进度同步、中部下滑退出 |
-| [v1.0.1](https://github.com/seaneasysaid/legadocomic.koplugin/releases/tag/v1.0.1) | 2026-09-22 | 两级菜单 |
-| [v1.0.0](https://github.com/seaneasysaid/legadocomic.koplugin/releases/tag/v1.0.0) | 2026-09-19 | 首个版本 |
