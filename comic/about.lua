@@ -10,7 +10,7 @@
 local M = {}
 
 -- 插件版本号 (唯一来源: _meta.lua 也从这里读)
-M.version = "1.0.5"
+M.version = "1.0.6"
 
 -- 插件描述 (_meta.lua 的 description 字段使用)
 M.description = "仅阅读安卓开源阅读(legado)书库中的漫画, 流式加载+磁盘缓存"

@@ -14,12 +14,40 @@ local About = require("comic/about")
 
 local Shelf = {}
 
+-- 所有创建过、可能还开着的自绘菜单。
+-- ⚠️ 只靠 owner[field]（Shelf._cust_menu）判断"当前开着哪一层"是**不可靠**的：
+-- ui/widget/menu.lua 的 Menu:onMenuSelect 在**每次选中条目**之后都会调 close_callback
+-- （1364-1377，不是只有真正关闭才调）。原来这个回调直接把 _cust_menu 置 nil，
+-- 于是"点一下「⟳ 刷新书架」"之后引用就没了、菜单却还在屏幕上；紧接着刷新完成要重画，
+-- open_custom_page 里的 close_custom_page 找不到引用 → 旧窗口没被关掉 → 叠出第二层。
+-- 点 X 只关掉新的一层，露出旧的 —— 表现就是「又回到刷新前的排序，而不是退出书架」。
+-- 同一路径下「只看漫画」开关、收藏夹里的操作也会同样叠层。
+local _cust_menus = {}
+
+-- 该菜单是否还在 KOReader 的窗口栈上（uimanager.lua:249 的 close 也读这个字段）。
+-- 取不到栈（如单测桩件）时按"还开着"处理：宁可多关一次，也不要漏关导致叠层。
+local function cust_menu_is_open(menu)
+    local stack = UIManager._window_stack
+    if type(stack) ~= "table" then return true end
+    for i = #stack, 1, -1 do
+        if stack[i] and stack[i].widget == menu then return true end
+    end
+    return false
+end
+
+local function forget_custom_menu(menu)
+    for i = #_cust_menus, 1, -1 do
+        if _cust_menus[i] == menu then table.remove(_cust_menus, i) end
+    end
+end
+
 -- 弹出菜单并把它登记到 owner 的一个字段上; 菜单被"它自己的路径"关掉时(点弹层外 /
 -- 硬件 Back 键 -> Menu:onCloseAllMenus)也要把引用收回来, 否则 owner 那边悬空:
 -- 下次会先 close 一个已经关掉的弹层(重复派发 CloseWidget/FlushSettings)。
 -- reader.lua:395 的目录弹层早就这么修了, 这里补齐。
 local function showMenu(title, items, owner, field)
-    local menu = Menu:new{
+    local menu
+    menu = Menu:new{
         title = title,
         item_table = items,
         show_parent = nil,
@@ -30,9 +58,18 @@ local function showMenu(title, items, owner, field)
         height = Screen:getHeight(),
         items_per_page = 14,
         single_line = true,
-        close_callback = (owner and field) and function() owner[field] = nil end or nil,
+        -- 只在**确实已经不在窗口栈里**时才收回引用：选中条目也会触发这个回调，
+        -- 那时菜单还活着，收回了就会漏关（见文件上方 _cust_menus 的说明）。
+        close_callback = function()
+            if not cust_menu_is_open(menu) then
+                forget_custom_menu(menu)
+                if owner and field and owner[field] == menu then owner[field] = nil end
+            end
+        end,
     }
+    _cust_menus[#_cust_menus + 1] = menu
     UIManager:show(menu)
+    if owner and field then owner[field] = menu end
     return menu
 end
 
@@ -559,6 +596,30 @@ function Shelf:favListItems(books)
     local enrich = enrich_from_shelf(books)
     for _, f in ipairs(favs) do enrich(f) end
 
+    -- 排序口径: **最近读过的在最上面**(本机进度 / App 进度取新, 与本文件 resolveResume 同口径)。
+    -- 原来直接沿用 Favs.list() 的「收藏时间」倒序 —— 收藏得早、但天天在看的书会被压在下面,
+    -- 而刚收藏还没翻过的书反倒置顶, 和「收藏夹是拿来接着看」的用法相反。
+    -- 一本都没读过的沉底, 组内仍按收藏时间新的在前(刚加的收藏不至于找不着)。
+    local function last_read_ts(book)
+        local ts = 0
+        local p = Progress.get(book)
+        if p and tonumber(p.ts) then ts = tonumber(p.ts) or 0 end
+        local app_ts = tonumber(book.durChapterTime)
+        if app_ts then
+            if app_ts > 1e11 then app_ts = app_ts / 1000 end -- ms -> s
+            if app_ts > ts then ts = app_ts end
+        end
+        return ts
+    end
+    local read_ts = {}
+    for _, f in ipairs(favs) do read_ts[f] = last_read_ts(f) end
+    table.sort(favs, function(a, b)
+        local ta, tb = read_ts[a], read_ts[b]
+        if (ta > 0) ~= (tb > 0) then return ta > 0 end -- 读过的整体排在没读过的前面
+        if ta ~= tb then return ta > tb end
+        return (tonumber(a.ts) or 0) > (tonumber(b.ts) or 0)
+    end)
+
     local items = {
         {
             text = "✎  收藏管理 (点击书名切换收藏)",
@@ -620,10 +681,16 @@ end
 -- 这里翻成"点开另一个自绘窗口"; 开关类项(item.checked_func)点完原地重画, 让 ◉/○ 跟着变。
 
 local function close_custom_page()
-    if Shelf._cust_menu then
-        pcall(function() UIManager:close(Shelf._cust_menu) end)
-        Shelf._cust_menu = nil
+    -- 关掉**所有**还开着的自绘菜单，而不是只看 Shelf._cust_menu
+    -- （它的引用会被 Menu:onMenuSelect 的 close_callback 提前清掉，见文件上方说明）。
+    local menus = _cust_menus
+    _cust_menus = {}
+    for _, m in ipairs(menus) do
+        if cust_menu_is_open(m) then
+            pcall(function() UIManager:close(m) end)
+        end
     end
+    Shelf._cust_menu = nil
 end
 
 local function custom_page_text(it)

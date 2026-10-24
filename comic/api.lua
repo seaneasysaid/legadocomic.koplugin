@@ -302,7 +302,10 @@ end
 -- maxtime 是**单次请求的总时限**(socketutil:set_timeout(timeout, maxtime)): 服务端"连上但一直
 -- 慢滴"时靠它兜底。取 30s —— 原来是 60s, 叠加"2 轮 × (代理+直连)"最坏能把 UI 冻 4 分钟,
 -- 而代理图已按屏宽缩放(通常几百 KB), 30s 足够。
-function M.downloadImageData(bookUrl, imgSrc)
+-- opts.budget: 本次下载的总时长预算(秒), 缺省 30。
+--   后台预取传更短的值(见 reader.lua 的 PREFETCH_BUDGET_SECONDS): 这些请求是 UI 线程上的
+--   同步 HTTP, 前台翻页等的是"这一张", 后台等的是"以后那几张", 两者不该用同一个预算。
+function M.downloadImageData(bookUrl, imgSrc, opts)
     local candidates = {}
     local proxied = M.proxyImageUrl(bookUrl, imgSrc)
     if proxied and proxied ~= imgSrc then
@@ -310,20 +313,22 @@ function M.downloadImageData(bookUrl, imgSrc)
     end
     candidates[#candidates + 1] = imgSrc
 
-    -- 单次下载的总时长预算(秒): 2 轮 × (代理 + 直连), 单次 maxtime 30s。
+    -- 单次下载的总时长预算(秒): 2 轮 × (代理 + 直连), 默认 30s(前台), 后台可传更短。
     -- 这些请求全在 UI 线程上同步跑(翻页 / 预取), 所以必须有个**真能生效**的总闸:
     --   ① 每次发起请求**之前**先算剩余预算, 用尽就不再发 —— 旧写法是请求返回之后才检查,
     --      拦不住已经发出去的那一次, 最坏仍要 ~60s 才发现超预算;
     --   ② 剩余预算直接当单次请求的 maxtime, "连上但慢滴"的请求也不会跑满 30s 才被放弃。
-    local BUDGET_SECONDS = 30
-    local last_err
+    local BUDGET_SECONDS = tonumber(opts and opts.budget) or 30
+    -- 再短就没意义了(连一次握手都不够), 夹一个下限防止调用方传进 0/负数
+    if BUDGET_SECONDS < 3 then BUDGET_SECONDS = 3 end
+    local last_err, last_status
     local started = os.time()
     for attempt = 1, 2 do
         for _, url in ipairs(candidates) do
             local remain = BUDGET_SECONDS - (os.time() - started)
             if remain <= 1 then
                 logger.warn("comic image download budget exceeded:", imgSrc, last_err)
-                return nil, tostring(last_err or "图片下载超时")
+                return nil, tostring(last_err or "图片下载超时"), last_status
             end
             local ok, resp = httpreq.request({
                 url = url,
@@ -335,10 +340,13 @@ function M.downloadImageData(bookUrl, imgSrc)
                 return resp.data
             end
             last_err = resp
+            -- 第 3 个返回值: HTTP 状态码。调用方靠它区分「403 = 签名过期」这类确定性失败
+            -- (resp 形如 "服务器返回错误: HTTP/1.1 403 Forbidden", 取第一段三位数字)。
+            last_status = tonumber(tostring(resp or ""):match("(%d%d%d)") or "")
         end
     end
     logger.warn("comic image download failed:", imgSrc, last_err)
-    return nil, tostring(last_err or "图片下载失败")
+    return nil, tostring(last_err or "图片下载失败"), last_status
 end
 
 -- 同步进度到 app (best-effort)

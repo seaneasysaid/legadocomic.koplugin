@@ -35,6 +35,22 @@ local M = ImageViewer:extend{
 -- (翻页会重新 schedulePrefetch 并把计数清零, 所以不会永久卡住)
 local PREFETCH_MAX_FAIL = 3
 
+-- ===== 前台优先 / 后台让路 =====
+-- 图片下载是 **UI 线程上的同步 HTTP**(见 api.downloadImageData), 所以"优先"只能靠后台让路:
+-- 用户刚翻页/点屏时, 预取这一 tick 什么都不做, 只把自己再排后 0.5s。
+-- 一次 tick 约 0.5s, 要求连续 PREFETCH_MIN_IDLE_TICKS 个 tick 都没有用户动作才开始下载
+-- (≈1s)。用户快速连翻时预取完全停摆, 停下来看一页时它再补 —— 这正是想要的行为。
+local PREFETCH_MIN_IDLE_TICKS = 2
+local PREFETCH_TICK_SECONDS = 0.5
+-- 后台单张图的总预算(秒)。前台默认 30s: 用户等的是"眼前这张", 值得多等;
+-- 后台等的是"后面几张", 一旦卡住就是白白占住 UI 线程, 所以给个明显更短的闸。
+local PREFETCH_BUDGET_SECONDS = 8
+
+-- 整章图片连续这么多张被服务端 403 -> 判定"本章签名地址已过期"。
+-- 书源正文(含图片的签名 URL)会被 Legado App 缓存, x-signature 过期后 CDN 一律 403;
+-- 签名是按章节批量生成的, 所以过期通常整章一致, 连续几张就能定性。
+local EXPIRED_HITS = 3
+
 -- 占位图(首屏加载失败时顶上去的那张): **必须每次新建**, 不能缓存共享。
 -- 它会被交给 ImageViewer(image_disposable=true), 换页时由 _applyPage、退出时由 onClose
 -- 显式 :free() 释放; 而 BlitBuffer:free 只释放底层缓冲区、**不会**把 data 置 nil
@@ -74,7 +90,17 @@ end
 function M:loadImage(img_index, imglist)
     local src = imglist[img_index]
     if not src then return nil end
-    local data = Cache.fetch(self.book.bookUrl, src, Api.downloadImageData)
+    -- 用自己的下载器包一层(而不是直接把 Api.downloadImageData 交给缓存):
+    -- 需要抓 HTTP 状态码来识别「403 = 本章签名已过期」。
+    local data = Cache.fetch(self.book.bookUrl, src, function(book_url, url)
+        local d, _err, status = Api.downloadImageData(book_url, url)
+        if d then
+            self._expired_hits = 0 -- 有一张能下 -> 不是整章过期, 计数清零
+        elseif tonumber(status) == 403 then
+            self._expired_hits = (self._expired_hits or 0) + 1
+        end
+        return d
+    end)
     if not data then return nil end
     local bb = RenderImage:renderImageData(data, #data, false)
     if not bb then
@@ -116,6 +142,7 @@ function M:onZoomOut() self:turnPage(1) return true end
 
 -- 直接拦截按键: 按名字模式匹配翻页, 其余交回 ImageViewer
 function M:onKeyPress(key)
+    self:_noteUserActivity()
     local name = tostring(key.key or key.text or "?")
     local n = name:lower()
     if n:find("pgfwd") or n == "pagedown" then
@@ -241,6 +268,7 @@ function M:onClose()
 end
 
 function M:onSwipe(_, ges)
+    self:_noteUserActivity()
     local direction = ges.direction
     local w = Screen:getWidth()
     -- 中部区域下滑关闭
@@ -259,6 +287,7 @@ end
 
 -- 单击分区翻页: 左1/3上一张, 右1/3下一张, 中间1/3呼出菜单
 function M:onTap(_, ges)
+    self:_noteUserActivity()
     if (self.scale_factor or 0) ~= 0 then
         -- 缩放状态下交给 ImageViewer 原生处理
         if type(ImageViewer.onTap) == "function" then
@@ -423,6 +452,7 @@ end
 
 -- 方向翻页: step = ±1, 跨章无缝
 function M:turnPage(step)
+    self:_noteUserActivity()
     local target_img = self.cur_img + step
     local target_ch = self.cur_ch
 
@@ -522,6 +552,12 @@ function M:_applyPage(ch_index, img_index, list, title)
     if img_index < 1 then img_index = 1 end
     if img_index > #list then img_index = #list end
 
+    -- 换章先把 403 计数清零(必须放在 loadImage **之前**, 否则会把本页刚累计的清掉)
+    if self.cur_ch ~= ch_index then
+        self._expired_hits = 0
+        self._expired_warned_ch = nil
+    end
+
     local bb = self:loadImage(img_index, list)
     if not bb then
         -- 失败时**不要**碰旧图: self.image 保持原样, 界面还能显示上一张, 用户重试即可。
@@ -529,7 +565,17 @@ function M:_applyPage(ch_index, img_index, list, title)
         --  self._image_wg 里仍留着那张已释放的 bb —— ImageWidget 在不缩放时 _bb 就是同一个
         --  bb, 且父类拿到的是 image_disposable=false 不会接管释放, 于是之后任何重绘都在画
         --  已释放内存, 轻则花屏重则崩溃。)
-        UI.info("页面加载失败, 请重试")
+        -- 整章 403 时不要只丢一句"加载失败": 那是书源缓存里的签名地址过期了,
+        -- 用户重试多少次都没用, 得去手机上刷新这本书。每章只提示一次, 之后静默
+        -- (占位图照常显示, 免得每翻一页都弹一次)。
+        if (self._expired_hits or 0) >= EXPIRED_HITS then
+            if self._expired_warned_ch ~= ch_index then
+                self._expired_warned_ch = ch_index
+                UI.info("本章内容已过期，建议刷新\n（服务器拒绝访问，请在手机上刷新本书后重试）", 5)
+            end
+        else
+            UI.info("页面加载失败, 请重试")
+        end
         return
     end
 
@@ -599,20 +645,33 @@ function M:_applyPage(ch_index, img_index, list, title)
 end
 
 ---------- 预取 ----------
+
+-- 用户主动操作(翻页/点屏/按键/跳章)时调用: 把"静默 tick"计数清零,
+-- 让后台预取先让路。只影响预取, 不影响前台加载。
+function M:_noteUserActivity()
+    self._prefetch_idle = 0
+end
+
+-- 排下一轮预取 tick。预取的所有延迟都走这里, 免得两处 scheduleIn 各写一套。
+function M:_schedulePrefetchTick(count, delay)
+    if self._closed then return end
+    self._prefetch_pending = true
+    self._prefetch_timer = UIManager:scheduleIn(delay or PREFETCH_TICK_SECONDS, function()
+        self._prefetch_pending = false
+        self._prefetch_timer = nil
+        if not self._closed then
+            self:prefetchStep(count)
+        end
+    end)
+end
+
 function M:schedulePrefetch()
     if self._closed or self._prefetch_pending then return end
     -- 新一页/新一轮预取: 失败计数清零, 给坏图/坏接口一次新的机会
     self._prefetch_fail = 0
     self._nextlist_fail = 0
     -- prefetch=0 时仍预取下一章"列表"(体积很小), 跨章才不卡
-    self._prefetch_pending = true
-    self._prefetch_timer = UIManager:scheduleIn(0.3, function()
-        self._prefetch_pending = false
-        self._prefetch_timer = nil
-        if not self._closed then
-            self:prefetchStep(0)
-        end
-    end)
+    self:_schedulePrefetchTick(0, 0.3)
 end
 
 -- lookahead: 距当前页的偏移, 返回图片 url 或 nil(没有更多)
@@ -648,6 +707,20 @@ function M:prefetchStep(count)
     end
     if self._closed then return end
 
+    -- 前台优先: 用户刚操作过就先让路。这一 tick 什么都不发(下一章列表也别取 —— 它同样是
+    -- UI 线程上的同步网络请求), 只把自己排后 0.5s。连续 PREFETCH_MIN_IDLE_TICKS 个 tick
+    -- 都没人碰, 说明用户正在看这一页, 才轮到后台干活。
+    -- 新开的阅读器 _prefetch_idle 为 nil: 用户还没操作过, 直接放行。
+    if self._prefetch_idle == nil then
+        self._prefetch_idle = PREFETCH_MIN_IDLE_TICKS
+    else
+        self._prefetch_idle = self._prefetch_idle + 1
+    end
+    if self._prefetch_idle < PREFETCH_MIN_IDLE_TICKS then
+        self:_schedulePrefetchTick(count)
+        return
+    end
+
     -- 确保"下一章列表"已就绪(提前取, 跨章翻页零等待); 与图片预取数无关。
     -- 失败也要计数: 这是 UI 线程上的同步请求(超时 25s), 不加闸的话每 0.5s 一个 tick 都会重发,
     -- 弱网下等于把界面反复冻住。翻页会 schedulePrefetch(把计数清零) -> 重新给机会。
@@ -672,7 +745,9 @@ function M:prefetchStep(count)
             if src then
                 local k = Cache.key(src)
                 if not Cache.has(k) then
-                    local data = Api.downloadImageData(self.book.bookUrl, src)
+                    -- 后台预算比前台短: 卡住时最多占 UI 线程 PREFETCH_BUDGET_SECONDS 秒
+                    local data = Api.downloadImageData(self.book.bookUrl, src,
+                        { budget = PREFETCH_BUDGET_SECONDS })
                     if data and #data > 0 then
                         Cache.put(k, data)
                         self._prefetch_fail = 0
@@ -707,14 +782,7 @@ function M:prefetchStep(count)
         end
     end
     if need_more then
-        self._prefetch_pending = true
-        self._prefetch_timer = UIManager:scheduleIn(0.5, function()
-            self._prefetch_pending = false
-            self._prefetch_timer = nil
-            if not self._closed then
-                self:prefetchStep(got_one and 0 or count + 1)
-            end
-        end)
+        self:_schedulePrefetchTick(got_one and 0 or count + 1)
     end
 end
 
